@@ -8,6 +8,7 @@ import requests
 import json
 import base64
 import os
+from pathlib import Path
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -27,8 +28,21 @@ class ExcelReaderApp:
         self.instance_id = ctk.StringVar()
         self.token = ctk.StringVar()
         
+        # Ajouter les callbacks de sauvegarde automatique
+        self.instance_id.trace_add('write', self.on_config_change)
+        self.token.trace_add('write', self.on_config_change)
+        
+        # Fichier de configuration
+        self.config_file = Path.home() / ".excel_whatsapp_config.json"
+        
         # Interface
         self.create_widgets()
+        
+        # Charger la configuration sauvegardée
+        self.load_config()
+        
+        # Sauvegarder à la fermeture
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
     
     def create_widgets(self):
         # Configuration du thème
@@ -137,6 +151,7 @@ class ExcelReaderApp:
         phone_label.pack(anchor='w', pady=(0, 5))
         
         self.phone_column = ctk.StringVar()
+        self.phone_column.trace_add('write', self.on_config_change)
         self.phone_column_combo = ctk.CTkComboBox(api_right, variable=self.phone_column, values=["Chargez d'abord un fichier Excel"], height=35, state="readonly")
         self.phone_column_combo.pack(fill='x', pady=(0, 10))
         
@@ -148,6 +163,9 @@ class ExcelReaderApp:
         self.user_message.pack(fill='x', pady=(0, 10))
         self.user_message.insert("0.0", "Bonjour,\\n\\nJe vous envoie les données demandées.\\n\\nCordialement.")
         
+        # Sauvegarder quand le message change
+        self.user_message.bind('<KeyRelease>', lambda e: self.save_config())
+        
         # Sélection d'image
         image_label = ctk.CTkLabel(api_right, text="🖼️ Image à envoyer (optionnel):", font=ctk.CTkFont(size=12, weight="bold"))
         image_label.pack(anchor='w', pady=(10, 5))
@@ -156,6 +174,7 @@ class ExcelReaderApp:
         image_select_frame.pack(fill='x', pady=(0, 10))
         
         self.selected_image = ctk.StringVar()
+        self.selected_image.trace_add('write', self.on_config_change)
         self.image_entry = ctk.CTkEntry(image_select_frame, textvariable=self.selected_image, placeholder_text="Chemin de l'image...", height=30, font=ctk.CTkFont(size=10))
         self.image_entry.pack(side='left', fill='x', expand=True, padx=(0, 5))
         
@@ -172,6 +191,7 @@ class ExcelReaderApp:
         
         # Checkbox à gauche
         self.include_excel_data = ctk.BooleanVar(value=True)
+        self.include_excel_data.trace_add('write', self.on_config_change)
         include_data_cb = ctk.CTkCheckBox(controls_frame, text="📊 Inclure les données Excel", variable=self.include_excel_data, font=ctk.CTkFont(size=10))
         include_data_cb.pack(side='left', padx=(0, 20))
         
@@ -272,6 +292,9 @@ class ExcelReaderApp:
             self.api_section.pack(fill='x', padx=20, pady=(5, 15))
             self.api_toggle_btn.configure(text="📱 Configuration UltraMsg API  ▼")
             self.api_visible.set(True)
+        
+        # Sauvegarder l'état
+        self.save_config()
     
     def browse_file(self):
         filename = filedialog.askopenfilename(
@@ -569,7 +592,7 @@ class ExcelReaderApp:
                         if not row_data.empty:
                             row_data_selected = row_data[selected_columns].iloc[0]
                             data_text = "\\n".join([f"{col}: {val}" for col, val in row_data_selected.items()])
-                            message = f"{user_message}"
+                            message = f"{user_message}\\n\\n--- VOS DONNÉES ---\\n{data_text}"
                         else:
                             message = user_message
                     else:
@@ -693,6 +716,68 @@ class ExcelReaderApp:
         except Exception as e:
             print(f"Erreur envoi image: {str(e)}")
             return False
+    
+    def save_config(self):
+        """Sauvegarder la configuration dans un fichier JSON"""
+        try:
+            config = {
+                'instance_id': self.instance_id.get(),
+                'token': self.token.get(),
+                'phone_column': self.phone_column.get() if hasattr(self, 'phone_column') else '',
+                'selected_image': self.selected_image.get() if hasattr(self, 'selected_image') else '',
+                'user_message': self.user_message.get("0.0", "end-1c") if hasattr(self, 'user_message') else '',
+                'include_excel_data': self.include_excel_data.get() if hasattr(self, 'include_excel_data') else True,
+                'api_visible': self.api_visible.get() if hasattr(self, 'api_visible') else False
+            }
+            
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            
+        except Exception as e:
+            print(f"Erreur sauvegarde config: {str(e)}")
+    
+    def load_config(self):
+        """Charger la configuration depuis le fichier JSON"""
+        try:
+            if self.config_file.exists():
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                
+                # Restaurer les valeurs
+                self.instance_id.set(config.get('instance_id', ''))
+                self.token.set(config.get('token', ''))
+                
+                if hasattr(self, 'phone_column') and config.get('phone_column'):
+                    self.phone_column.set(config.get('phone_column', ''))
+                
+                if hasattr(self, 'selected_image'):
+                    self.selected_image.set(config.get('selected_image', ''))
+                
+                if hasattr(self, 'user_message') and config.get('user_message'):
+                    self.user_message.delete("0.0", "end")
+                    self.user_message.insert("0.0", config.get('user_message', ''))
+                
+                if hasattr(self, 'include_excel_data'):
+                    self.include_excel_data.set(config.get('include_excel_data', True))
+                
+                if hasattr(self, 'api_visible'):
+                    api_visible = config.get('api_visible', False)
+                    self.api_visible.set(api_visible)
+                    if api_visible:
+                        self.api_section.pack(fill='x', padx=20, pady=(5, 15))
+                        self.api_toggle_btn.configure(text="📱 Configuration UltraMsg API  ▼")
+                
+        except Exception as e:
+            print(f"Erreur chargement config: {str(e)}")
+    
+    def on_config_change(self, *args):
+        """Sauvegarder automatiquement quand la configuration change"""
+        self.save_config()
+    
+    def on_closing(self):
+        """Sauvegarder la configuration avant de fermer l'application"""
+        self.save_config()
+        self.root.destroy()
 
 def main():
     root = ctk.CTk()
