@@ -592,7 +592,7 @@ class ExcelReaderApp:
                         if not row_data.empty:
                             row_data_selected = row_data[selected_columns].iloc[0]
                             data_text = "\\n".join([f"{col}: {val}" for col, val in row_data_selected.items()])
-                            message = f"{user_message}\\n\\n--- VOS DONNÉES ---\\n{data_text}"
+                            message = f"{user_message}"
                         else:
                             message = user_message
                     else:
