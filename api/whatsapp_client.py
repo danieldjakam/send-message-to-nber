@@ -160,29 +160,70 @@ class WhatsAppClient:
             file_extension = os.path.splitext(image_path)[1].lower()
             mime_type = self.mime_types.get(file_extension, 'image/jpeg')
             
+            # Validation supplémentaire
+            if file_extension not in self.mime_types:
+                logger.warning("unsupported_image_type", extension=file_extension, path=image_path)
+            
+            # Vérifier que l'encodage base64 n'est pas trop long
+            if len(image_base64) > 7000000:  # ~5MB en base64
+                error = f"Image encodée trop volumineuse: {len(image_base64)} caractères"
+                logger.log_message_sent(phone, False, "image", error)
+                return MessageResult(phone, False, error=error, message_type="image")
+            
+            # Limiter la longueur du caption (UltraMsg limite à 1024 caractères)
+            max_caption_length = 1020  # Marge de sécurité
+            if len(caption) > max_caption_length:
+                # Troncature intelligente - préserver le début du message
+                truncation_suffix = "... [message tronqué pour respecter la limite de l'API]"
+                available_length = max_caption_length - len(truncation_suffix)
+                truncated_caption = caption[:available_length] + truncation_suffix
+                logger.warning("caption_truncated", 
+                              original_length=len(caption), 
+                              truncated_length=len(truncated_caption),
+                              phone=phone)
+            else:
+                truncated_caption = caption
+            
             url = f"{self.base_url}/messages/image"
             payload = {
                 'token': self.token,
                 'to': phone,
                 'image': f"data:{mime_type};base64,{image_base64}",
-                'caption': caption
+                'caption': truncated_caption
             }
             
             response = requests.post(url, data=payload, timeout=self.image_timeout)
             
             if response.status_code == 200:
-                result_data = response.json()
+                try:
+                    result_data = response.json()
+                except ValueError as e:
+                    error = f"Réponse JSON invalide: {response.text[:200]}"
+                    logger.log_message_sent(phone, False, "image", error)
+                    return MessageResult(phone, False, error=error, message_type="image")
+                
                 success = result_data.get('sent', False)
                 
                 if success:
                     logger.log_message_sent(phone, True, "image")
                     return MessageResult(phone, True, response_data=result_data, message_type="image")
                 else:
-                    error = result_data.get('message', 'Échec d\'envoi d\'image inconnu')
-                    logger.log_message_sent(phone, False, "image", error)
+                    # Détails plus précis sur l'erreur
+                    error_msg = result_data.get('message', '')
+                    error_code = result_data.get('error', '')
+                    error_description = result_data.get('description', '')
+                    
+                    if error_msg or error_code or error_description:
+                        # Convertir tous les éléments en chaînes pour éviter les erreurs de join
+                        error_parts = [str(part) for part in [error_code, error_msg, error_description] if part]
+                        error = f"API Error: {' | '.join(error_parts)}"
+                    else:
+                        error = f"Échec d'envoi d'image - Response: {result_data}"
+                    
+                    logger.log_message_sent(phone, False, "image", f"{error} | File: {os.path.basename(image_path)} ({file_size} bytes) | Phone: {phone}")
                     return MessageResult(phone, False, error=error, response_data=result_data, message_type="image")
             else:
-                error = f"Erreur HTTP {response.status_code}: {response.text}"
+                error = f"Erreur HTTP {response.status_code}: {response.text[:200]}"
                 logger.log_message_sent(phone, False, "image", error)
                 return MessageResult(phone, False, error=error, message_type="image")
         

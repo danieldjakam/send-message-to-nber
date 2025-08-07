@@ -861,9 +861,9 @@ class ExcelWhatsAppApp:
         """Exécute un envoi avec progression détaillée"""
         try:
             # Callbacks pour la progression détaillée
-            def progress_callback(completed, total):
+            def progress_callback(completed, total, status):
                 self.root.after(0, lambda: self.detailed_progress.update_progress(
-                    completed, total, f"Envoi en cours: {completed}/{total}"
+                    completed, total, status
                 ))
             
             def status_callback(msg):
@@ -890,9 +890,9 @@ class ExcelWhatsAppApp:
             # Utiliser la barre de progression intégrée
             self.root.after(0, lambda: self.progress_frame.show("Envoi des messages..."))
             
-            def progress_callback(completed, total):
+            def progress_callback(completed, total, status):
                 self.root.after(0, lambda: self.progress_frame.update(
-                    completed, total, f"Envoi: {completed}/{total}"
+                    completed, total, status
                 ))
             
             session = self.bulk_sender.send_bulk_optimized(
@@ -1048,10 +1048,19 @@ class ExcelWhatsAppApp:
             if selected_columns:
                 data_lines = []
                 for col in selected_columns:
-                    value = str(row[col]) if pd.notna(row[col]) else "N/A"
-                    data_lines.append(f"{col}: {value}")
+                    try:
+                        # Assurer que col est bien une chaîne
+                        col_name = str(col) if col is not None else "Unknown"
+                        value = str(row[col]) if pd.notna(row[col]) else "N/A"
+                        data_line = f"{col_name}: {value}"
+                        data_lines.append(data_line)
+                    except Exception as e:
+                        logger.warning("data_line_creation_error", col=col, error=str(e))
+                        continue
                 
                 if data_lines:
+                    # Vérifier que tous les éléments sont des chaînes
+                    data_lines = [str(line) for line in data_lines]
                     message += "\n\n📋 Données:\n" + "\n".join(data_lines)
             
             messages.append((phone_raw, message, image_path))
