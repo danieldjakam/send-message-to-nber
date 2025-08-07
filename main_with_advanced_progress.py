@@ -502,7 +502,8 @@ class ExcelWhatsAppApp:
                 self.simple_overlay.update(50, 100, "Lecture des données...")
                 time.sleep(0.3)
                 
-                self.df = pd.read_excel(file_path)
+                # Lire le fichier en convertissant toutes les colonnes en texte pour préserver les numéros de téléphone
+                self.df = pd.read_excel(file_path, dtype=str)
                 
                 if self.df.empty:
                     self.root.after(0, lambda: self._handle_file_error("Le fichier Excel est vide"))
@@ -1035,10 +1036,31 @@ class ExcelWhatsAppApp:
             selected_columns = [col for col, var in self.column_vars.items() if var.get()]
         
         for idx, row in self.df.iterrows():
-            phone_raw = str(row[phone_column]).strip()
+            phone_value = row[phone_column]
+            
+            # Gérer la notation scientifique et les formats numériques
+            if pd.isna(phone_value):
+                continue
+            
+            # Convertir de notation scientifique vers nombre entier si possible
+            try:
+                if isinstance(phone_value, (int, float)):
+                    # Convertir sans notation scientifique
+                    phone_raw = f"{phone_value:.0f}" if phone_value == phone_value else ""
+                else:
+                    phone_raw = str(phone_value).strip()
+            except (ValueError, OverflowError):
+                phone_raw = str(phone_value).strip()
             
             if not phone_raw or phone_raw.lower() in ['nan', 'none', '']:
                 continue
+            
+            # Correction intelligente pour les numéros corrompus (ex: Cameroun 237)
+            if phone_raw.startswith('237') and len(phone_raw) > 15:
+                # Probablement un numéro camerounais corrompu, on garde les 12 premiers chiffres
+                corrected_phone = phone_raw[:12]  # 237 + 9 chiffres
+                logger.info("phone_corrected", original=phone_raw, corrected=corrected_phone, row=idx)
+                phone_raw = corrected_phone
             
             if not PhoneValidator.is_valid_phone(phone_raw):
                 logger.warning("invalid_phone_skipped", phone=phone_raw, row=idx)

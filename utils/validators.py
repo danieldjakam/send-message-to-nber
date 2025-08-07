@@ -15,6 +15,7 @@ class PhoneValidator:
         'international': r'^\+[1-9]\d{1,14}$',
         'french_mobile': r'^(?:\+33|0033|33)?[67]\d{8}$',
         'french_landline': r'^(?:\+33|0033|33)?[1-5]\d{8}$',
+        'cameroon': r'^(?:\+237|237)?[6-9]\d{8}$',  # Numéros camerounais
         'whatsapp_format': r'^\d{10,15}$'  # Format WhatsApp sans préfixes
     }
     
@@ -53,6 +54,13 @@ class PhoneValidator:
         elif cleaned.startswith('0') and len(cleaned) == 10:
             # Numéro français sans indicatif
             cleaned = '+33' + cleaned[1:]
+        
+        # Gérer les formats camerounais
+        elif cleaned.startswith('0237'):
+            cleaned = '+237' + cleaned[4:]
+        elif cleaned.startswith('237') and len(cleaned) >= 11:
+            # Ajouter le + pour les numéros camerounais
+            cleaned = '+237' + cleaned[3:]
         
         return cleaned
     
