@@ -600,7 +600,7 @@ class ExcelReaderApp:
                     
                     # Limiter la longueur du message
                     if len(message) > 4000:
-                        message = message[:3900] + "...\\n\\n[Message tronqué]"
+                        message = message[:3900] + "..."
                     
                     # Envoyer le message (texte ou image)
                     if self.selected_image.get() and os.path.exists(self.selected_image.get()):

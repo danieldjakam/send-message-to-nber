@@ -174,7 +174,7 @@ class WhatsAppClient:
             max_caption_length = 1020  # Marge de sécurité
             if len(caption) > max_caption_length:
                 # Troncature intelligente - préserver le début du message
-                truncation_suffix = "... [message tronqué pour respecter la limite de l'API]"
+                truncation_suffix = "..."
                 available_length = max_caption_length - len(truncation_suffix)
                 truncated_caption = caption[:available_length] + truncation_suffix
                 logger.warning("caption_truncated", 
