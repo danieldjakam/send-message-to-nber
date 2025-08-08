@@ -14,6 +14,10 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+import json
+import hashlib
+import os
+from datetime import datetime
 
 # Imports des modules personnalisés
 from config.config_manager import ConfigManager
@@ -54,6 +58,12 @@ class ExcelWhatsAppApp:
         self.column_vars: Dict[str, tk.BooleanVar] = {}
         self.is_sending = False
         
+        # Fonctionnalités historique
+        self.sent_numbers_file = Path.home() / ".excel_whatsapp_sent_numbers.json"
+        self.sent_numbers = self.load_sent_numbers()
+        self.history_file = Path.home() / ".excel_whatsapp_history.json"
+        self.history = self.load_history()
+        
         # Variables UI
         self.selected_file = ctk.StringVar()
         self.instance_id = ctk.StringVar()
@@ -65,8 +75,8 @@ class ExcelWhatsAppApp:
         # Tracer les changements pour la sauvegarde automatique
         self._setup_config_traces()
         
-        # Interface utilisateur
-        self.create_widgets()
+        # Interface utilisateur avec onglets
+        self.create_tabbed_interface()
         
         # Charger la configuration sauvegardée
         self.load_config()
@@ -81,6 +91,217 @@ class ExcelWhatsAppApp:
         self.phone_column.trace_add('write', self.on_config_change)
         self.selected_image.trace_add('write', self.on_config_change)
         self.include_excel_data.trace_add('write', self.on_config_change)
+    
+    def create_tabbed_interface(self):
+        """Crée l'interface avec onglets : Envoi + Historique"""
+        # Configuration du thème
+        self.root.configure(fg_color=("#f0f0f0", "#212121"))
+        
+        # Titre principal avec version
+        title_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        title_frame.pack(pady=20)
+        
+        title_label = ctk.CTkLabel(
+            title_frame, 
+            text="📊 Excel vers WhatsApp Pro", 
+            font=ctk.CTkFont(size=28, weight="bold")
+        )
+        title_label.pack()
+        
+        version_label = ctk.CTkLabel(
+            title_frame,
+            text="Version 2.2 - Barres Avancées + Historique Anti-Doublons",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        version_label.pack()
+        
+        # Status global avec animation
+        self.status_indicator = StatusIndicator(
+            self.root,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.status_indicator.pack(pady=(0, 10))
+        
+        # Créer le système d'onglets
+        self.tabview = ctk.CTkTabview(self.root)
+        self.tabview.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        # Onglet Principal (Envoi de messages)
+        self.main_tab = self.tabview.add("📤 Envoi")
+        self.create_main_tab_content()
+        
+        # Onglet Historique
+        self.history_tab = self.tabview.add("📋 Historique")
+        self.create_history_tab_content()
+    
+    def create_main_tab_content(self):
+        """Crée le contenu de l'onglet principal"""
+        # Section de sélection de fichier
+        self.file_section = self._create_file_section()
+        
+        # Section de configuration API (repliable)
+        self.api_section = self._create_api_section()
+        
+        # Barre de progression avancée intégrée
+        self.progress_frame = ProgressFrame(self.main_tab)
+        
+        # Overlay de progression simple pour petits volumes
+        self.simple_overlay = SimpleProgressOverlay(self.main_tab, corner_radius=10)
+        
+        # Section des colonnes
+        self.columns_section = self._create_columns_section()
+        
+        # Section d'affichage des données
+        self.data_section = self._create_data_section()
+    
+    def create_history_tab_content(self):
+        """Crée l'onglet historique avec filtrage et statistiques"""
+        # Titre et boutons de contrôle
+        header_frame = ctk.CTkFrame(self.history_tab, fg_color="transparent")
+        header_frame.pack(fill='x', padx=20, pady=10)
+        
+        history_title = ctk.CTkLabel(
+            header_frame, 
+            text="📋 Historique des envois", 
+            font=ctk.CTkFont(size=20, weight="bold")
+        )
+        history_title.pack(side='left')
+        
+        # Boutons de contrôle à droite
+        controls_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
+        controls_frame.pack(side='right')
+        
+        refresh_btn = ctk.CTkButton(
+            controls_frame,
+            text="🔄 Actualiser",
+            command=self.refresh_history,
+            height=30,
+            width=100,
+            font=ctk.CTkFont(size=10, weight="bold")
+        )
+        refresh_btn.pack(side='left', padx=(0, 10))
+        
+        clear_btn = ctk.CTkButton(
+            controls_frame,
+            text="🗑️ Vider",
+            command=self.clear_history,
+            height=30,
+            width=80,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            fg_color=("red", "darkred"),
+            hover_color=("darkred", "red")
+        )
+        clear_btn.pack(side='left')
+        
+        # Filtres
+        filter_frame = ctk.CTkFrame(self.history_tab, corner_radius=10)
+        filter_frame.pack(fill='x', padx=20, pady=(0, 10))
+        
+        filter_label = ctk.CTkLabel(filter_frame, text="🔍 Filtres:", font=ctk.CTkFont(size=12, weight="bold"))
+        filter_label.pack(anchor='w', padx=10, pady=(10, 5))
+        
+        filter_controls = ctk.CTkFrame(filter_frame, fg_color="transparent")
+        filter_controls.pack(fill='x', padx=10, pady=(0, 10))
+        
+        # Filtre par statut
+        status_label = ctk.CTkLabel(filter_controls, text="Statut:", font=ctk.CTkFont(size=10))
+        status_label.pack(side='left', padx=(0, 5))
+        
+        self.status_filter = ctk.CTkComboBox(
+            filter_controls,
+            values=["Tous", "Succès", "Échec"],
+            command=self.filter_history,
+            width=100,
+            height=25,
+            font=ctk.CTkFont(size=10)
+        )
+        self.status_filter.pack(side='left', padx=(0, 20))
+        
+        # Filtre par téléphone
+        phone_label = ctk.CTkLabel(filter_controls, text="Téléphone:", font=ctk.CTkFont(size=10))
+        phone_label.pack(side='left', padx=(0, 5))
+        
+        self.phone_filter = ctk.CTkEntry(
+            filter_controls,
+            placeholder_text="Filtrer par numéro...",
+            width=150,
+            height=25,
+            font=ctk.CTkFont(size=10)
+        )
+        self.phone_filter.pack(side='left', padx=(0, 10))
+        self.phone_filter.bind('<KeyRelease>', lambda e: self.filter_history())
+        
+        # Statistiques
+        stats_frame = ctk.CTkFrame(self.history_tab, corner_radius=10)
+        stats_frame.pack(fill='x', padx=20, pady=(0, 10))
+        
+        stats_label = ctk.CTkLabel(stats_frame, text="📊 Statistiques:", font=ctk.CTkFont(size=12, weight="bold"))
+        stats_label.pack(anchor='w', padx=10, pady=(10, 5))
+        
+        self.stats_frame = ctk.CTkFrame(stats_frame, fg_color="transparent")
+        self.stats_frame.pack(fill='x', padx=10, pady=(0, 10))
+        
+        # Tableau d'historique
+        history_table_frame = ctk.CTkFrame(self.history_tab, corner_radius=10)
+        history_table_frame.pack(fill='both', expand=True, padx=20, pady=(0, 20))
+        
+        # Style du tableau
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure("History.Treeview", 
+                       background="#2b2b2b",
+                       foreground="white",
+                       rowheight=25,
+                       fieldbackground="#2b2b2b")
+        style.configure("History.Treeview.Heading",
+                       background="#1f538d",
+                       foreground="white",
+                       relief="flat")
+        style.map("History.Treeview",
+                 background=[('selected', '#144870')])
+        
+        # Colonnes du tableau
+        columns = ("Date/Heure", "Fichier", "Téléphone", "Statut", "Type", "Erreur")
+        
+        self.history_tree = ttk.Treeview(
+            history_table_frame, 
+            columns=columns, 
+            show='headings', 
+            height=15,
+            style="History.Treeview"
+        )
+        
+        # Configuration des colonnes
+        self.history_tree.heading("Date/Heure", text="Date/Heure")
+        self.history_tree.heading("Fichier", text="Fichier")
+        self.history_tree.heading("Téléphone", text="Téléphone")
+        self.history_tree.heading("Statut", text="Statut")
+        self.history_tree.heading("Type", text="Type")
+        self.history_tree.heading("Erreur", text="Erreur")
+        
+        self.history_tree.column("Date/Heure", width=150, minwidth=140)
+        self.history_tree.column("Fichier", width=200, minwidth=150)
+        self.history_tree.column("Téléphone", width=120, minwidth=100)
+        self.history_tree.column("Statut", width=80, minwidth=70)
+        self.history_tree.column("Type", width=70, minwidth=60)
+        self.history_tree.column("Erreur", width=200, minwidth=150)
+        
+        # Scrollbars
+        v_scrollbar = ttk.Scrollbar(history_table_frame, orient="vertical", command=self.history_tree.yview)
+        h_scrollbar = ttk.Scrollbar(history_table_frame, orient="horizontal", command=self.history_tree.xview)
+        self.history_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        
+        # Placement des widgets
+        self.history_tree.grid(row=0, column=0, sticky='nsew', padx=10, pady=10)
+        v_scrollbar.grid(row=0, column=1, sticky='ns', pady=10)
+        h_scrollbar.grid(row=1, column=0, sticky='ew', padx=10)
+        
+        history_table_frame.grid_rowconfigure(0, weight=1)
+        history_table_frame.grid_columnconfigure(0, weight=1)
+        
+        # Charger l'historique initial
+        self.refresh_history()
     
     def create_widgets(self):
         """Crée l'interface utilisateur moderne avec barres de chargement"""
@@ -133,7 +354,7 @@ class ExcelWhatsAppApp:
     
     def _create_file_section(self) -> ctk.CTkFrame:
         """Crée la section de sélection de fichier"""
-        file_frame = ctk.CTkFrame(self.root, corner_radius=15)
+        file_frame = ctk.CTkFrame(self.main_tab, corner_radius=15)
         file_frame.pack(pady=10, padx=30, fill='x')
         
         file_label = ctk.CTkLabel(
@@ -184,7 +405,7 @@ class ExcelWhatsAppApp:
     
     def _create_api_section(self) -> CollapsibleSection:
         """Crée la section de configuration API"""
-        api_section = CollapsibleSection(self.root, "📱 Configuration UltraMsg API")
+        api_section = CollapsibleSection(self.main_tab, "📱 Configuration UltraMsg API")
         api_section.pack(fill='x', padx=30, pady=10)
         
         content = api_section.get_content_frame()
@@ -325,7 +546,7 @@ class ExcelWhatsAppApp:
     
     def _create_columns_section(self) -> ctk.CTkFrame:
         """Crée la section de sélection des colonnes"""
-        columns_frame = ctk.CTkFrame(self.root, corner_radius=15)
+        columns_frame = ctk.CTkFrame(self.main_tab, corner_radius=15)
         columns_frame.pack(fill='x', padx=30, pady=10)
         
         # Titre
@@ -387,7 +608,7 @@ class ExcelWhatsAppApp:
     
     def _create_data_section(self) -> ctk.CTkFrame:
         """Crée la section d'affichage des données"""
-        data_frame = ctk.CTkFrame(self.root, corner_radius=15)
+        data_frame = ctk.CTkFrame(self.main_tab, corner_radius=15)
         data_frame.pack(fill='both', expand=True, padx=30, pady=10)
         
         # Titre
@@ -860,6 +1081,9 @@ class ExcelWhatsAppApp:
     def _execute_detailed_bulk_send(self, messages_data: List[tuple]):
         """Exécute un envoi avec progression détaillée"""
         try:
+            file_path = self.selected_file.get()
+            file_hash = self.get_file_hash(file_path) if file_path else None
+            
             # Callbacks pour la progression détaillée
             def progress_callback(completed, total, status):
                 self.root.after(0, lambda: self.detailed_progress.update_progress(
@@ -869,11 +1093,25 @@ class ExcelWhatsAppApp:
             def status_callback(msg):
                 self.root.after(0, lambda: self.detailed_progress.add_log(msg))
             
-            # Exécuter l'envoi
+            # Callback personnalisé pour enregistrer les résultats dans l'historique
+            def result_callback(result: MessageResult):
+                message_type = "image" if result.message_type == "image" else "text"
+                status = "success" if result.success else "failed"
+                error_msg = result.error if not result.success else None
+                
+                # Ajouter à l'historique
+                self.add_to_history(file_path, file_hash, result.phone, status, message_type, error_msg)
+                
+                # Ajouter aux numéros traités si succès
+                if result.success and file_hash:
+                    self.add_sent_number(file_hash, result.phone)
+            
+            # Exécuter l'envoi avec callback personnalisé
             session = self.bulk_sender.send_bulk_optimized(
                 messages_data,
                 progress_callback=progress_callback,
-                status_callback=status_callback
+                status_callback=status_callback,
+                result_callback=result_callback
             )
             
             # Traiter les résultats
@@ -887,6 +1125,9 @@ class ExcelWhatsAppApp:
     def _execute_simple_bulk_send(self, messages_data: List[tuple]):
         """Exécute un envoi simple avec overlay de progression"""
         try:
+            file_path = self.selected_file.get()
+            file_hash = self.get_file_hash(file_path) if file_path else None
+            
             # Utiliser la barre de progression intégrée
             self.root.after(0, lambda: self.progress_frame.show("Envoi des messages..."))
             
@@ -895,10 +1136,24 @@ class ExcelWhatsAppApp:
                     completed, total, status
                 ))
             
+            # Callback pour l'historique
+            def result_callback(result: MessageResult):
+                message_type = "image" if result.message_type == "image" else "text"
+                status = "success" if result.success else "failed"
+                error_msg = result.error if not result.success else None
+                
+                # Ajouter à l'historique
+                self.add_to_history(file_path, file_hash, result.phone, status, message_type, error_msg)
+                
+                # Ajouter aux numéros traités si succès
+                if result.success and file_hash:
+                    self.add_sent_number(file_hash, result.phone)
+            
             session = self.bulk_sender.send_bulk_optimized(
                 messages_data,
                 progress_callback=progress_callback,
-                status_callback=lambda msg: self.root.after(0, lambda: self.progress_frame.progress_label.configure(text=msg))
+                status_callback=lambda msg: self.root.after(0, lambda: self.progress_frame.progress_label.configure(text=msg)),
+                result_callback=result_callback
             )
             
             self.root.after(0, lambda: self._handle_simple_bulk_send_results(session))
@@ -926,6 +1181,9 @@ class ExcelWhatsAppApp:
             else:
                 self.detailed_progress.add_log(f"⚠️ Envoi terminé avec {session.failed} erreurs")
                 self.status_indicator.set_status('warning', f"Envoi terminé avec erreurs: {session.successful}/{session.total_messages}")
+            
+            # Actualiser l'historique dans l'onglet
+            self.refresh_history()
             
         except Exception as e:
             logger.error("detailed_bulk_send_results_error", error=str(e))
@@ -957,6 +1215,9 @@ class ExcelWhatsAppApp:
                 self.status_indicator.set_status('success', f"Envoi terminé: {session.successful}/{session.total_messages}")
             else:
                 self.status_indicator.set_status('warning', f"Envoi terminé avec erreurs: {session.successful}/{session.total_messages}")
+            
+            # Actualiser l'historique dans l'onglet
+            self.refresh_history()
         
         except Exception as e:
             logger.error("simple_bulk_send_results_error", error=str(e))
@@ -1024,15 +1285,21 @@ class ExcelWhatsAppApp:
         return errors
     
     def _prepare_messages_data(self) -> List[tuple]:
-        """Prépare les données pour l'envoi en masse"""
+        """Prépare les données pour l'envoi en masse en évitant les doublons"""
         messages = []
         phone_column = self.phone_column.get()
         user_message = self.message_composer.get_message()
         image_path = self.selected_image.get() if self.selected_image.get() else None
         
+        # Obtenir le hash du fichier pour la vérification des doublons
+        file_path = self.selected_file.get()
+        file_hash = self.get_file_hash(file_path) if file_path else None
+        
         selected_columns = []
         if self.include_excel_data.get():
             selected_columns = [col for col, var in self.column_vars.items() if var.get()]
+        
+        skipped_count = 0
         
         for idx, row in self.df.iterrows():
             phone_raw = str(row[phone_column]).strip()
@@ -1042,6 +1309,13 @@ class ExcelWhatsAppApp:
             
             if not PhoneValidator.is_valid_phone(phone_raw):
                 logger.warning("invalid_phone_skipped", phone=phone_raw, row=idx)
+                continue
+            
+            # Vérifier les doublons si on a un hash de fichier
+            formatted_phone = PhoneValidator.format_for_whatsapp(phone_raw)
+            if file_hash and self.is_number_sent(file_hash, formatted_phone):
+                logger.info("duplicate_phone_skipped", phone=formatted_phone, file_hash=file_hash[:8])
+                skipped_count += 1
                 continue
             
             message = user_message
@@ -1063,7 +1337,14 @@ class ExcelWhatsAppApp:
                     data_lines = [str(line) for line in data_lines]
                     message += "\n\n📋 Données:\n" + "\n".join(data_lines)
             
-            messages.append((phone_raw, message, image_path))
+            messages.append((formatted_phone, message, image_path))
+        
+        # Logger les informations sur les doublons
+        if skipped_count > 0:
+            logger.info("duplicates_filtered", skipped=skipped_count, total_messages=len(messages))
+            self.status_indicator.set_status('info', f'Préparé: {len(messages)} messages ({skipped_count} doublons ignorés)')
+        else:
+            self.status_indicator.set_status('success', f'Préparé: {len(messages)} messages')
         
         return messages
     
@@ -1079,7 +1360,8 @@ class ExcelWhatsAppApp:
                 f"• Barres de progression multiples animées\n"
                 f"• Contrôles interactifs (Pause/Reprise)\n"
                 f"• Statistiques temps réel\n"
-                f"• Configuration des paramètres\n\n"
+                f"• Configuration des paramètres\n"
+                f"• Historique complet avec anti-doublons\n\n"
                 f"⚠️ Cette opération peut prendre plusieurs heures.\n"
                 f"Êtes-vous sûr de vouloir continuer ?"
             )
@@ -1093,7 +1375,8 @@ class ExcelWhatsAppApp:
                 f"• Barres de progression animées\n"
                 f"• Statistiques temps réel (débit, ETA)\n"
                 f"• Journal d'activité en direct\n"
-                f"• Compteurs de succès/échecs\n\n"
+                f"• Compteurs de succès/échecs\n"
+                f"• Historique et prévention des doublons\n\n"
                 f"Êtes-vous sûr de vouloir continuer ?"
             )
         else:
@@ -1105,7 +1388,8 @@ class ExcelWhatsAppApp:
                 f"⚡ Envoi rapide avec barre de progression animée\n"
                 f"• Progression fluide temps réel\n"
                 f"• Statistiques de débit\n"
-                f"• Changement de couleur selon l'avancement\n\n"
+                f"• Changement de couleur selon l'avancement\n"
+                f"• Enregistrement dans l'historique\n\n"
                 f"Êtes-vous sûr de vouloir continuer ?"
             )
         
@@ -1187,6 +1471,221 @@ class ExcelWhatsAppApp:
         
         finally:
             self.root.destroy()
+    
+    # ============================================================================
+    # MÉTHODES DE GESTION DE L'HISTORIQUE ET DES DOUBLONS
+    # ============================================================================
+    
+    def get_file_hash(self, file_path):
+        """Générer un hash unique pour identifier un fichier Excel"""
+        try:
+            with open(file_path, 'rb') as f:
+                file_hash = hashlib.md5(f.read()).hexdigest()
+            return file_hash
+        except Exception:
+            return None
+    
+    def load_sent_numbers(self):
+        """Charger les numéros déjà traités depuis le fichier de sauvegarde"""
+        try:
+            if self.sent_numbers_file.exists():
+                with open(self.sent_numbers_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            return {}
+        except Exception:
+            return {}
+    
+    def save_sent_numbers(self):
+        """Sauvegarder les numéros traités dans le fichier"""
+        try:
+            with open(self.sent_numbers_file, 'w', encoding='utf-8') as f:
+                json.dump(self.sent_numbers, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error("sent_numbers_save_error", error=str(e))
+    
+    def add_sent_number(self, file_hash, phone_number):
+        """Ajouter un numéro à la liste des traités pour un fichier donné"""
+        if file_hash not in self.sent_numbers:
+            self.sent_numbers[file_hash] = []
+        if phone_number not in self.sent_numbers[file_hash]:
+            self.sent_numbers[file_hash].append(phone_number)
+            self.save_sent_numbers()
+    
+    def is_number_sent(self, file_hash, phone_number):
+        """Vérifier si un numéro a déjà été traité pour un fichier donné"""
+        return file_hash in self.sent_numbers and phone_number in self.sent_numbers[file_hash]
+    
+    def load_history(self):
+        """Charger l'historique détaillé depuis le fichier"""
+        try:
+            if self.history_file.exists():
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            return []
+        except Exception:
+            return []
+    
+    def save_history(self):
+        """Sauvegarder l'historique dans le fichier"""
+        try:
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(self.history, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error("history_save_error", error=str(e))
+    
+    def add_to_history(self, file_path, file_hash, phone_number, status, message_type="text", error_msg=None):
+        """Ajouter une entrée à l'historique"""
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "file_path": file_path,
+            "file_hash": file_hash,
+            "phone_number": phone_number,
+            "status": status,  # "success" ou "failed"
+            "message_type": message_type,
+            "error_message": error_msg
+        }
+        self.history.append(entry)
+        self.save_history()
+    
+    def refresh_history(self):
+        """Actualise l'affichage de l'historique"""
+        # Vider le tableau
+        for item in self.history_tree.get_children():
+            self.history_tree.delete(item)
+        
+        # Recharger l'historique depuis le fichier
+        self.history = self.load_history()
+        
+        # Trier par date (plus récent en premier)
+        sorted_history = sorted(self.history, key=lambda x: x.get('timestamp', ''), reverse=True)
+        
+        # Remplir le tableau
+        for entry in sorted_history:
+            timestamp = entry.get('timestamp', '')
+            try:
+                dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00') if 'Z' in timestamp else timestamp)
+                formatted_date = dt.strftime("%d/%m/%Y %H:%M")
+            except:
+                formatted_date = timestamp[:16] if timestamp else 'N/A'
+            
+            file_name = Path(entry.get('file_path', '')).name if entry.get('file_path') else 'N/A'
+            phone = entry.get('phone_number', 'N/A')
+            status = "✅ Succès" if entry.get('status') == 'success' else "❌ Échec"
+            message_type = entry.get('message_type', 'text').capitalize()
+            error = entry.get('error_message', '') or ''
+            
+            if len(error) > 50:
+                error = error[:47] + "..."
+            
+            self.history_tree.insert('', 'end', values=(
+                formatted_date, file_name, phone, status, message_type, error
+            ))
+        
+        # Mettre à jour les statistiques
+        self.update_statistics()
+    
+    def update_statistics(self):
+        """Met à jour les statistiques de l'historique"""
+        # Vider les statistiques actuelles
+        for widget in self.stats_frame.winfo_children():
+            widget.destroy()
+        
+        if not self.history:
+            stats_text = ctk.CTkLabel(
+                self.stats_frame,
+                text="Aucune donnée disponible",
+                font=ctk.CTkFont(size=11)
+            )
+            stats_text.pack(side='left')
+            return
+        
+        # Calculer les statistiques
+        total = len(self.history)
+        success = sum(1 for h in self.history if h.get('status') == 'success')
+        failed = total - success
+        
+        # Types de messages
+        text_messages = sum(1 for h in self.history if h.get('message_type') == 'text')
+        image_messages = total - text_messages
+        
+        # Afficher les statistiques
+        stats = [
+            f"📊 Total: {total}",
+            f"✅ Succès: {success}",
+            f"❌ Échecs: {failed}",
+            f"📝 Texte: {text_messages}",
+            f"🖼️ Images: {image_messages}"
+        ]
+        
+        if total > 0:
+            success_rate = (success / total) * 100
+            stats.append(f"🎯 Taux: {success_rate:.1f}%")
+        
+        for stat in stats:
+            stat_label = ctk.CTkLabel(
+                self.stats_frame,
+                text=stat,
+                font=ctk.CTkFont(size=11)
+            )
+            stat_label.pack(side='left', padx=(0, 20))
+    
+    def filter_history(self, *args):
+        """Filtre l'historique selon les critères"""
+        # Vider le tableau
+        for item in self.history_tree.get_children():
+            self.history_tree.delete(item)
+        
+        # Obtenir les filtres
+        status_filter = self.status_filter.get()
+        phone_filter = self.phone_filter.get().lower()
+        
+        # Filtrer les données
+        filtered_history = []
+        for entry in self.history:
+            # Filtre par statut
+            if status_filter == "Succès" and entry.get('status') != 'success':
+                continue
+            if status_filter == "Échec" and entry.get('status') == 'success':
+                continue
+            
+            # Filtre par téléphone
+            if phone_filter and phone_filter not in entry.get('phone_number', '').lower():
+                continue
+            
+            filtered_history.append(entry)
+        
+        # Trier par date (plus récent en premier)
+        sorted_history = sorted(filtered_history, key=lambda x: x.get('timestamp', ''), reverse=True)
+        
+        # Remplir le tableau avec les données filtrées
+        for entry in sorted_history:
+            timestamp = entry.get('timestamp', '')
+            try:
+                dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00') if 'Z' in timestamp else timestamp)
+                formatted_date = dt.strftime("%d/%m/%Y %H:%M")
+            except:
+                formatted_date = timestamp[:16] if timestamp else 'N/A'
+            
+            file_name = Path(entry.get('file_path', '')).name if entry.get('file_path') else 'N/A'
+            phone = entry.get('phone_number', 'N/A')
+            status = "✅ Succès" if entry.get('status') == 'success' else "❌ Échec"
+            message_type = entry.get('message_type', 'text').capitalize()
+            error = entry.get('error_message', '') or ''
+            
+            if len(error) > 50:
+                error = error[:47] + "..."
+            
+            self.history_tree.insert('', 'end', values=(
+                formatted_date, file_name, phone, status, message_type, error
+            ))
+    
+    def clear_history(self):
+        """Vide l'historique après confirmation"""
+        if messagebox.askyesno("Confirmation", "Êtes-vous sûr de vouloir vider tout l'historique ?\nCette action est irréversible."):
+            self.history = []
+            self.save_history()
+            self.refresh_history()
+            messagebox.showinfo("Historique vidé", "L'historique a été vidé avec succès.")
 
 
 def main():
