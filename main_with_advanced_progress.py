@@ -27,7 +27,8 @@ from utils.validators import PhoneValidator, DataValidator
 from utils.logger import logger
 from utils.exceptions import *
 from utils.anti_spam_manager import AntiSpamManager, create_balanced_config
-from ui.anti_spam_widget import AntiSpamConfigWidget, AntiSpamStatusWidget
+from ui.anti_spam_widget import AntiSpamStatusWidget
+from ui.anti_spam_config_widget import UserCustomizableAntiSpamWidget
 from ui.components import (
     StatusIndicator, ProgressFrame, CollapsibleSection, 
     ValidatedEntry, DataTable, MessageComposer
@@ -319,7 +320,7 @@ class ExcelWhatsAppApp:
     def create_antispam_tab_content(self):
         """Crée l'onglet de configuration anti-spam"""
         # Widget de configuration anti-spam
-        self.antispam_config_widget = AntiSpamConfigWidget(
+        self.antispam_config_widget = UserCustomizableAntiSpamWidget(
             self.antispam_tab, 
             self.anti_spam_manager,
             on_config_change=self.on_antispam_config_change

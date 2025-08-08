@@ -27,6 +27,11 @@ import threading
 import time
 from typing import Optional, List, Dict, Any
 
+# Imports des modules anti-spam
+from utils.anti_spam_manager import AntiSpamManager, create_balanced_config
+from ui.anti_spam_widget import AntiSpamStatusWidget
+from ui.anti_spam_config_widget import UserCustomizableAntiSpamWidget
+
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
@@ -66,6 +71,9 @@ class ExcelWhatsAppCompleteApp:
         self.sent_numbers = self.load_sent_numbers()
         self.history_file = Path.home() / ".excel_whatsapp_history.json"
         self.history = self.load_history()
+        
+        # Système anti-spam
+        self.anti_spam_manager = AntiSpamManager(create_balanced_config())
         
         # Interface avec onglets
         self.create_widgets()
@@ -119,6 +127,10 @@ class ExcelWhatsAppCompleteApp:
         # Onglet Historique
         self.history_tab = self.tabview.add("📋 Historique")
         self.create_history_tab()
+        
+        # Onglet Anti-Spam
+        self.antispam_tab = self.tabview.add("🛡️ Protection")
+        self.create_antispam_tab()
         
         # Overlay de progression
         self.progress_overlay = None
@@ -488,6 +500,35 @@ class ExcelWhatsAppCompleteApp:
         # Charger l'historique initial
         self.refresh_history()
     
+    def create_antispam_tab(self):
+        """Crée l'onglet de configuration anti-spam"""
+        # Widget de statut anti-spam compact en haut
+        status_frame = ctk.CTkFrame(self.antispam_tab, corner_radius=10)
+        status_frame.pack(fill="x", padx=10, pady=(10, 5))
+        
+        self.antispam_status_widget = AntiSpamStatusWidget(status_frame, self.anti_spam_manager)
+        self.antispam_status_widget.pack(fill="x", expand=True)
+        
+        # Widget de configuration anti-spam personnalisable
+        self.antispam_config_widget = UserCustomizableAntiSpamWidget(
+            self.antispam_tab, 
+            self.anti_spam_manager,
+            on_config_change=self.on_antispam_config_change
+        )
+        self.antispam_config_widget.pack(fill="both", expand=True, padx=10, pady=5)
+    
+    def on_antispam_config_change(self, new_config):
+        """Callback appelé lors du changement de configuration anti-spam"""
+        # Mettre à jour le widget de statut
+        if hasattr(self, 'antispam_status_widget'):
+            self.antispam_status_widget.update_status()
+        
+        # Log du changement
+        print(f"Configuration anti-spam mise à jour:")
+        print(f"  - Messages/jour: {new_config.max_messages_per_day}")
+        print(f"  - Messages/heure: {new_config.max_messages_per_hour}")
+        print(f"  - Pattern: {new_config.behavior_pattern.value}")
+    
     # ============================================================================
     # MÉTHODES UTILITAIRES
     # ============================================================================
@@ -593,6 +634,36 @@ class ExcelWhatsAppCompleteApp:
                 self.root.update()
             
             # Attendre 1 seconde
+            time.sleep(1)
+    
+    def wait_with_antispam_protection(self, phone_number: str = "", update_callback=None):
+        """Attente intelligente avec protection anti-spam"""
+        can_send, reason, delay = self.anti_spam_manager.can_send_message()
+        
+        if not can_send:
+            # Attente avec protection anti-spam
+            self._countdown_wait(delay, f"⏸️ Attente anti-spam: {reason}", update_callback)
+            self.anti_spam_manager.record_pause(delay)
+        else:
+            # Attente recommandée même si autorisé
+            if delay > 0:
+                self._countdown_wait(delay, f"⏱️ Délai intelligent: {delay}s", update_callback)
+    
+    def _countdown_wait(self, duration: int, base_message: str, update_callback=None):
+        """Effectue une attente avec compte à rebours"""
+        for remaining in range(duration, 0, -1):
+            minutes = remaining // 60
+            seconds = remaining % 60
+            time_str = f"{minutes:01d}:{seconds:02d}"
+            
+            message = f"{base_message} ({time_str})"
+            
+            if update_callback:
+                update_callback(message)
+            else:
+                # Mise à jour par défaut du statut
+                self.root.after(0, lambda msg=message: self.set_status('info', msg))
+            
             time.sleep(1)
     
     # ============================================================================
@@ -1236,20 +1307,17 @@ class ExcelWhatsAppCompleteApp:
                         # Ajouter à l'historique
                         self.add_to_history(file_path, file_hash, phone_number, "failed", msg_type, error_msg)
                     
-                    # Pause de sécurité entre chaque envoi
-                    time.sleep(1)
+                    # Enregistrer l'envoi dans l'anti-spam manager
+                    self.anti_spam_manager.record_message_sent(success, delivered=success)
                     
-                    # Pause de 1 minute après chaque groupe de 10 messages
-                    if i % 10 == 0 and i < total_numbers:
-                        self.root.after(0, lambda i=i: self.connection_status.configure(
-                            text=f"⏸️ Pause après {i} messages..."
-                        ))
-                        self.pause_with_countdown("⏸️ Reprend dans: ")
-                        
-                        # Mettre à jour le status après la pause
-                        self.root.after(0, lambda i=i: self.connection_status.configure(
-                            text=f"📤 Reprise: {i}/{total_numbers}"
-                        ))
+                    # Mise à jour du widget de statut anti-spam
+                    if hasattr(self, 'antispam_status_widget'):
+                        self.root.after(0, lambda: self.antispam_status_widget.update_status())
+                    
+                    # Attente anti-spam intelligente au lieu d'une pause fixe
+                    if i < total_numbers:  # Pas de pause après le dernier message
+                        self.wait_with_antispam_protection(phone_number, lambda current=i, total=total_numbers, msg="Attente anti-spam...": 
+                            self.update_progress_overlay(current, total, msg))
                     
                 except Exception as e:
                     failed_count += 1
