@@ -13,7 +13,7 @@ import tkinter as tk
 import threading
 import time
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import json
 import hashlib
 import os
@@ -26,6 +26,8 @@ from api.bulk_sender import BulkSender
 from utils.validators import PhoneValidator, DataValidator
 from utils.logger import logger
 from utils.exceptions import *
+from utils.anti_spam_manager import AntiSpamManager, create_balanced_config
+from ui.anti_spam_widget import AntiSpamConfigWidget, AntiSpamStatusWidget
 from ui.components import (
     StatusIndicator, ProgressFrame, CollapsibleSection, 
     ValidatedEntry, DataTable, MessageComposer
@@ -63,6 +65,9 @@ class ExcelWhatsAppApp:
         self.sent_numbers = self.load_sent_numbers()
         self.history_file = Path.home() / ".excel_whatsapp_history.json"
         self.history = self.load_history()
+        
+        # Système anti-spam
+        self.anti_spam_manager = AntiSpamManager(create_balanced_config())
         
         # Variables UI
         self.selected_file = ctk.StringVar()
@@ -134,6 +139,10 @@ class ExcelWhatsAppApp:
         # Onglet Historique
         self.history_tab = self.tabview.add("📋 Historique")
         self.create_history_tab_content()
+        
+        # Onglet Anti-Spam
+        self.antispam_tab = self.tabview.add("🛡️ Anti-Spam")
+        self.create_antispam_tab_content()
     
     def create_main_tab_content(self):
         """Crée le contenu de l'onglet principal"""
@@ -148,6 +157,10 @@ class ExcelWhatsAppApp:
         
         # Overlay de progression simple pour petits volumes
         self.simple_overlay = SimpleProgressOverlay(self.main_tab, corner_radius=10)
+        
+        # Widget de statut anti-spam
+        self.antispam_status_widget = AntiSpamStatusWidget(self.main_tab, self.anti_spam_manager)
+        self.antispam_status_widget.pack(fill='x', padx=30, pady=5)
         
         # Section des colonnes
         self.columns_section = self._create_columns_section()
@@ -302,6 +315,23 @@ class ExcelWhatsAppApp:
         
         # Charger l'historique initial
         self.refresh_history()
+    
+    def create_antispam_tab_content(self):
+        """Crée l'onglet de configuration anti-spam"""
+        # Widget de configuration anti-spam
+        self.antispam_config_widget = AntiSpamConfigWidget(
+            self.antispam_tab, 
+            self.anti_spam_manager,
+            on_config_change=self.on_antispam_config_change
+        )
+        self.antispam_config_widget.pack(fill="both", expand=True, padx=10, pady=10)
+    
+    def on_antispam_config_change(self, new_config):
+        """Callback appelé lors du changement de configuration anti-spam"""
+        logger.info("antispam_config_updated", 
+                   max_daily=new_config.max_messages_per_day,
+                   max_hourly=new_config.max_messages_per_hour,
+                   pattern=new_config.behavior_pattern.value)
     
     def create_widgets(self):
         """Crée l'interface utilisateur moderne avec barres de chargement"""
@@ -1093,25 +1123,11 @@ class ExcelWhatsAppApp:
             def status_callback(msg):
                 self.root.after(0, lambda: self.detailed_progress.add_log(msg))
             
-            # Callback personnalisé pour enregistrer les résultats dans l'historique
-            def result_callback(result: MessageResult):
-                message_type = "image" if result.message_type == "image" else "text"
-                status = "success" if result.success else "failed"
-                error_msg = result.error if not result.success else None
-                
-                # Ajouter à l'historique
-                self.add_to_history(file_path, file_hash, result.phone, status, message_type, error_msg)
-                
-                # Ajouter aux numéros traités si succès
-                if result.success and file_hash:
-                    self.add_sent_number(file_hash, result.phone)
-            
-            # Exécuter l'envoi avec callback personnalisé
-            session = self.bulk_sender.send_bulk_optimized(
+            # Exécuter l'envoi avec protection anti-spam personnalisée
+            session = self._execute_bulk_send_with_antispam(
                 messages_data,
-                progress_callback=progress_callback,
-                status_callback=status_callback,
-                result_callback=result_callback
+                progress_callback,
+                status_callback
             )
             
             # Traiter les résultats
@@ -1136,24 +1152,11 @@ class ExcelWhatsAppApp:
                     completed, total, status
                 ))
             
-            # Callback pour l'historique
-            def result_callback(result: MessageResult):
-                message_type = "image" if result.message_type == "image" else "text"
-                status = "success" if result.success else "failed"
-                error_msg = result.error if not result.success else None
-                
-                # Ajouter à l'historique
-                self.add_to_history(file_path, file_hash, result.phone, status, message_type, error_msg)
-                
-                # Ajouter aux numéros traités si succès
-                if result.success and file_hash:
-                    self.add_sent_number(file_hash, result.phone)
-            
-            session = self.bulk_sender.send_bulk_optimized(
+            # Exécuter l'envoi avec protection anti-spam
+            session = self._execute_bulk_send_with_antispam(
                 messages_data,
-                progress_callback=progress_callback,
-                status_callback=lambda msg: self.root.after(0, lambda: self.progress_frame.progress_label.configure(text=msg)),
-                result_callback=result_callback
+                progress_callback,
+                lambda msg: self.root.after(0, lambda: self.progress_frame.progress_label.configure(text=msg))
             )
             
             self.root.after(0, lambda: self._handle_simple_bulk_send_results(session))
@@ -1349,7 +1352,19 @@ class ExcelWhatsAppApp:
         return messages
     
     def _confirm_bulk_send(self, total_messages: int) -> bool:
-        """Demande confirmation avant l'envoi en masse avec description des barres de chargement"""
+        """Demande confirmation avant l'envoi en masse avec description des barres de chargement et vérifications anti-spam"""
+        # Vérifications anti-spam
+        can_proceed, reason, warnings = self.check_antispam_limits_before_bulk_send(total_messages)
+        
+        if not can_proceed:
+            messagebox.showerror("🚨 Protection Anti-Spam", f"Envoi bloqué par la protection anti-spam:\n\n{reason}")
+            return False
+        
+        # Préparer le message avec les avertissements anti-spam
+        antispam_section = ""
+        if warnings:
+            antispam_section = f"\n🛡️ ALERTES ANTI-SPAM:\n" + "\n".join(warnings) + "\n"
+        
         if total_messages > 1000:
             confirm_msg = (
                 f"🚀 Envoi en Masse - GROS VOLUME\n\n"
@@ -1361,7 +1376,8 @@ class ExcelWhatsAppApp:
                 f"• Contrôles interactifs (Pause/Reprise)\n"
                 f"• Statistiques temps réel\n"
                 f"• Configuration des paramètres\n"
-                f"• Historique complet avec anti-doublons\n\n"
+                f"• Historique complet avec anti-doublons\n"
+                f"{antispam_section}"
                 f"⚠️ Cette opération peut prendre plusieurs heures.\n"
                 f"Êtes-vous sûr de vouloir continuer ?"
             )
@@ -1376,7 +1392,8 @@ class ExcelWhatsAppApp:
                 f"• Statistiques temps réel (débit, ETA)\n"
                 f"• Journal d'activité en direct\n"
                 f"• Compteurs de succès/échecs\n"
-                f"• Historique et prévention des doublons\n\n"
+                f"• Historique et prévention des doublons\n"
+                f"{antispam_section}"
                 f"Êtes-vous sûr de vouloir continuer ?"
             )
         else:
@@ -1389,7 +1406,8 @@ class ExcelWhatsAppApp:
                 f"• Progression fluide temps réel\n"
                 f"• Statistiques de débit\n"
                 f"• Changement de couleur selon l'avancement\n"
-                f"• Enregistrement dans l'historique\n\n"
+                f"• Enregistrement dans l'historique\n"
+                f"{antispam_section}"
                 f"Êtes-vous sûr de vouloir continuer ?"
             )
         
@@ -1471,6 +1489,256 @@ class ExcelWhatsAppApp:
         
         finally:
             self.root.destroy()
+    
+    # ============================================================================
+    # MÉTHODES ANTI-SPAM INTELLIGENTES
+    # ============================================================================
+    
+    def wait_with_antispam_protection(self, phone_number: str = "", update_callback=None):
+        """
+        Attendre avec protection anti-spam intelligente
+        Returns: (can_proceed, reason)
+        """
+        try:
+            # Vérifier si on peut envoyer
+            can_send, reason, delay = self.anti_spam_manager.can_send_message()
+            
+            if not can_send:
+                if update_callback:
+                    update_callback(f"⏸️ Protection anti-spam: {reason}")
+                
+                # Attendre le délai recommandé avec mise à jour visuelle
+                self._countdown_wait(delay, f"⏸️ Attente anti-spam: {reason}", update_callback)
+                
+                # Re-vérifier après l'attente
+                can_send, reason, delay = self.anti_spam_manager.can_send_message()
+                if not can_send:
+                    return False, f"Toujours bloqué: {reason}"
+            
+            # Calculer le délai intelligent pour ce message
+            smart_delay = self.anti_spam_manager.calculate_intelligent_delay()
+            
+            if update_callback:
+                update_callback(f"⏱️ Délai intelligent: {smart_delay}s pour {phone_number}")
+            
+            # Attendre avec compte à rebours
+            self._countdown_wait(smart_delay, f"⏱️ Délai anti-spam intelligent", update_callback)
+            
+            return True, "Envoi autorisé"
+            
+        except Exception as e:
+            logger.error("antispam_wait_error", error=str(e), phone=phone_number)
+            return True, f"Erreur anti-spam (continue): {str(e)}"
+    
+    def _countdown_wait(self, duration: int, base_message: str, update_callback=None):
+        """Attendre avec compte à rebours visuel"""
+        if duration <= 0:
+            return
+        
+        for remaining in range(duration, 0, -1):
+            if not self.is_sending:  # Arrêt si annulé
+                break
+                
+            # Formater le temps restant
+            minutes = remaining // 60
+            seconds = remaining % 60
+            time_str = f"{minutes:02d}:{seconds:02d}"
+            
+            # Mettre à jour le callback si fourni
+            if update_callback:
+                update_callback(f"{base_message} - {time_str}")
+            
+            # Attendre 1 seconde
+            time.sleep(1)
+    
+    def record_message_result_with_antispam(self, phone: str, success: bool, delivered: bool = True, error: str = None):
+        """Enregistre le résultat d'un message avec mise à jour anti-spam"""
+        try:
+            # Enregistrer dans l'historique normal
+            file_path = self.selected_file.get()
+            file_hash = self.get_file_hash(file_path) if file_path else None
+            message_type = "image" if self.selected_image.get() else "text"
+            status = "success" if success else "failed"
+            
+            self.add_to_history(file_path, file_hash, phone, status, message_type, error)
+            
+            if success and file_hash:
+                self.add_sent_number(file_hash, phone)
+            
+            # Enregistrer dans le système anti-spam
+            self.anti_spam_manager.record_message_sent(success, delivered)
+            
+            # Mettre à jour le widget de statut
+            if hasattr(self, 'antispam_status_widget'):
+                self.root.after(0, lambda: self.antispam_status_widget.update_status())
+            
+        except Exception as e:
+            logger.error("antispam_record_error", error=str(e), phone=phone)
+    
+    def check_antispam_limits_before_bulk_send(self, message_count: int) -> Tuple[bool, str, List[str]]:
+        """
+        Vérifie les limites anti-spam avant un envoi en masse
+        Returns: (can_proceed, reason, warnings)
+        """
+        warnings = []
+        
+        try:
+            today_stats = self.anti_spam_manager.get_today_stats()
+            config = self.anti_spam_manager.config
+            risk_analysis = self.anti_spam_manager.get_risk_analysis()
+            
+            # Vérification limite quotidienne
+            remaining_today = config.max_messages_per_day - today_stats.messages_sent
+            if message_count > remaining_today:
+                if remaining_today <= 0:
+                    return False, f"Limite quotidienne atteinte ({config.max_messages_per_day})", warnings
+                else:
+                    warnings.append(f"⚠️ Seulement {remaining_today} messages restants aujourd'hui")
+                    warnings.append(f"📊 {message_count - remaining_today} messages seront reportés demain")
+            
+            # Vérification niveau de risque
+            risk_level = risk_analysis["risk_level"]
+            if risk_level == "critical":
+                return False, "🚨 Niveau de risque CRITIQUE - Envoi bloqué pour protection", warnings
+            elif risk_level == "high":
+                warnings.append("🟠 Niveau de risque ÉLEVÉ - Délais très longs appliqués")
+            elif risk_level == "medium":
+                warnings.append("🟡 Niveau de risque MOYEN - Délais renforcés")
+            
+            # Vérification heures de travail
+            if not self.anti_spam_manager.is_within_working_hours():
+                warnings.append("🕐 Hors heures de travail - Simulation comportement humain")
+            
+            # Estimation du temps total
+            estimated_time = self._estimate_total_send_time_with_antispam(message_count)
+            if estimated_time > 3600:  # Plus d'1 heure
+                hours = estimated_time // 3600
+                warnings.append(f"⏱️ Temps estimé: ~{hours}h (avec pauses anti-spam)")
+            
+            return True, "Vérifications anti-spam OK", warnings
+            
+        except Exception as e:
+            logger.error("antispam_check_error", error=str(e))
+            return True, f"Erreur vérification (continue): {str(e)}", warnings
+    
+    def _estimate_total_send_time_with_antispam(self, message_count: int) -> int:
+        """Estime le temps total d'envoi avec protections anti-spam"""
+        try:
+            config = self.anti_spam_manager.config
+            risk_level = self.anti_spam_manager.calculate_risk_level()
+            
+            # Délai moyen par message
+            avg_delay = (config.min_delay_between_messages + config.max_delay_between_messages) // 2
+            
+            # Ajustements selon le risque
+            if risk_level.value == "high":
+                avg_delay *= 2
+            elif risk_level.value == "medium":
+                avg_delay *= 1.5
+            
+            # Pauses longues
+            long_pauses = message_count // config.long_pause_after_count
+            long_pause_time = long_pauses * (config.long_pause_min + config.long_pause_max) // 2
+            
+            # Temps de base pour les messages
+            base_time = message_count * 5  # 5s par message
+            
+            return base_time + (avg_delay * message_count) + long_pause_time
+            
+        except Exception:
+            return message_count * 60  # Fallback: 1 minute par message
+    
+    def _execute_bulk_send_with_antispam(self, messages_data: List[tuple], progress_callback, status_callback):
+        """Exécute un envoi en masse avec protection anti-spam complète"""
+        from dataclasses import dataclass
+        
+        @dataclass
+        class BulkSession:
+            total_messages: int = 0
+            successful: int = 0
+            failed: int = 0
+            results: List = None
+            
+            def __post_init__(self):
+                if self.results is None:
+                    self.results = []
+        
+        session = BulkSession(total_messages=len(messages_data))
+        
+        try:
+            for i, (phone, message, image_path) in enumerate(messages_data, 1):
+                if not self.is_sending:  # Arrêt si annulé
+                    break
+                
+                # Mise à jour du progrès
+                if progress_callback:
+                    progress_callback(i-1, len(messages_data), f"Préparation envoi à {phone}")
+                
+                # Protection anti-spam avec attente intelligente
+                can_proceed, reason = self.wait_with_antispam_protection(
+                    phone, 
+                    lambda msg: status_callback(msg) if status_callback else None
+                )
+                
+                if not can_proceed:
+                    # Enregistrer l'échec
+                    self.record_message_result_with_antispam(phone, False, False, reason)
+                    session.failed += 1
+                    continue
+                
+                # Mise à jour du progrès
+                if progress_callback:
+                    progress_callback(i-1, len(messages_data), f"Envoi à {phone}...")
+                
+                # Envoyer le message
+                try:
+                    if image_path and os.path.exists(image_path):
+                        result = self.whatsapp_client.send_image_message(phone, image_path, message)
+                    else:
+                        result = self.whatsapp_client.send_text_message(phone, message)
+                    
+                    # Enregistrer le résultat
+                    if result.success:
+                        self.record_message_result_with_antispam(phone, True, True)
+                        session.successful += 1
+                        if status_callback:
+                            status_callback(f"✅ Envoyé à {phone}")
+                    else:
+                        self.record_message_result_with_antispam(phone, False, False, result.error)
+                        session.failed += 1
+                        if status_callback:
+                            status_callback(f"❌ Échec pour {phone}: {result.error}")
+                    
+                    session.results.append(result)
+                    
+                except Exception as e:
+                    error_msg = f"Erreur envoi: {str(e)}"
+                    self.record_message_result_with_antispam(phone, False, False, error_msg)
+                    session.failed += 1
+                    if status_callback:
+                        status_callback(f"❌ Erreur pour {phone}: {error_msg}")
+                
+                # Vérifier les pauses longues recommandées
+                should_pause, pause_duration = self.anti_spam_manager.should_take_long_pause()
+                if should_pause and i < len(messages_data):  # Pas de pause après le dernier
+                    self.anti_spam_manager.record_pause(pause_duration)
+                    if status_callback:
+                        status_callback(f"⏸️ Pause longue recommandée: {pause_duration//60}min")
+                    self._countdown_wait(
+                        pause_duration, 
+                        "⏸️ Pause longue anti-spam",
+                        lambda msg: status_callback(msg) if status_callback else None
+                    )
+                
+                # Mise à jour finale du progrès
+                if progress_callback:
+                    progress_callback(i, len(messages_data), f"Complété: {session.successful} succès, {session.failed} échecs")
+            
+            return session
+            
+        except Exception as e:
+            logger.error("bulk_send_antispam_error", error=str(e))
+            raise e
     
     # ============================================================================
     # MÉTHODES DE GESTION DE L'HISTORIQUE ET DES DOUBLONS
