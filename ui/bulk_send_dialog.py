@@ -266,8 +266,9 @@ class BulkSendDialog(ctk.CTkToplevel):
             self.after(0, self.sending_completed)
             
         except Exception as e:
-            logger.error("bulk_send_thread_error", error=str(e))
-            self.after(0, lambda: self.handle_error(f"Erreur d'envoi: {str(e)}"))
+            error_msg = str(e)
+            logger.error("bulk_send_thread_error", error=error_msg)
+            self.after(0, lambda: self.handle_error(f"Erreur d'envoi: {error_msg}"))
     
     def update_progress(self, completed: int, total: int, status: str):
         """Met à jour la progression (appelé depuis le thread d'envoi)"""

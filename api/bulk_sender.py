@@ -12,6 +12,7 @@ from pathlib import Path
 import queue
 import gc
 from utils.logger import logger
+from utils.duplicate_tracker import DuplicateTracker
 from api.whatsapp_client import WhatsAppClient, MessageResult
 
 
@@ -49,6 +50,9 @@ class BulkSender:
         self.retry_attempts = 2
         self.memory_cleanup_interval = 100  # Nettoyer la mémoire tous les 100 messages
         
+        # Limite anti-spam
+        self.MAX_MESSAGES_PER_SESSION = 2500  # Limite pour éviter les blocages WhatsApp
+        
         # État de l'envoi
         self.current_session: Optional[SendingSession] = None
         self.is_paused = False
@@ -59,6 +63,9 @@ class BulkSender:
         # File d'attente pour les résultats
         self.results_queue = queue.Queue()
         self.lock = threading.Lock()
+        
+        # Tracker pour éviter les doublons
+        self.duplicate_tracker = DuplicateTracker()
     
     def send_bulk_optimized(
         self,
@@ -79,6 +86,47 @@ class BulkSender:
         self.progress_callback = progress_callback
         self.status_callback = status_callback
         
+        # Filtrer les doublons avant de créer la session
+        filtered_data, duplicates = self.duplicate_tracker.filter_unsent_numbers(messages_data)
+        
+        if duplicates:
+            logger.info("duplicates_filtered", 
+                       total_original=len(messages_data),
+                       filtered_count=len(filtered_data),
+                       duplicates_count=len(duplicates))
+            
+            if self.status_callback:
+                self.status_callback(f"⚠️ {len(duplicates)} doublons ignorés - {len(filtered_data)} messages à envoyer")
+        
+        if not filtered_data:
+            logger.warning("no_messages_to_send", reason="all_duplicates")
+            if self.status_callback:
+                self.status_callback("✅ Tous les numéros ont déjà été contactés")
+            
+            # Créer une session vide pour éviter les erreurs
+            session = SendingSession(
+                session_id=f"empty_session_{int(time.time())}",
+                total_messages=0,
+                start_time=time.time()
+            )
+            session.is_completed = True
+            return session
+        
+        # Vérifier la limite anti-spam
+        if len(filtered_data) > self.MAX_MESSAGES_PER_SESSION:
+            logger.warning("message_limit_exceeded", 
+                          requested=len(filtered_data),
+                          limit=self.MAX_MESSAGES_PER_SESSION)
+            
+            if self.status_callback:
+                self.status_callback(f"⚠️ LIMITE ATTEINTE: {len(filtered_data)} messages > {self.MAX_MESSAGES_PER_SESSION} (limite)")
+            
+            # Tronquer à la limite maximale
+            filtered_data = filtered_data[:self.MAX_MESSAGES_PER_SESSION]
+            
+            if self.status_callback:
+                self.status_callback(f"📊 Envoi limité aux premiers {len(filtered_data)} messages pour éviter le spam")
+        
         # Créer ou reprendre une session
         if resume_session_id:
             session = self._load_session(resume_session_id)
@@ -88,9 +136,12 @@ class BulkSender:
             session_id = f"bulk_send_{int(time.time())}"
             session = SendingSession(
                 session_id=session_id,
-                total_messages=len(messages_data),
+                total_messages=len(filtered_data),
                 start_time=time.time()
             )
+        
+        # Utiliser les données filtrées
+        messages_data = filtered_data
         
         self.current_session = session
         
@@ -198,32 +249,102 @@ class BulkSender:
                     batch_results.append(result)
                     logger.error("task_submission_error", phone=phone, error=str(e))
             
-            # Collecter les résultats
-            for future in as_completed(future_to_data, timeout=300):  # 5 min timeout par batch
-                if self.is_cancelled:
-                    future.cancel()
-                    continue
+            # Collecter les résultats avec gestion des timeouts
+            completed_futures = set()
+            try:
+                for future in as_completed(future_to_data, timeout=300):  # 5 min timeout par batch
+                    if self.is_cancelled:
+                        future.cancel()
+                        continue
+                    
+                    completed_futures.add(future)
+                    
+                    try:
+                        result = future.result(timeout=60)  # 1 min timeout par message
+                        batch_results.append(result)
+                        
+                        # Mettre à jour la progression
+                        total_completed = self.current_session.completed + len(batch_results)
+                        self._update_progress(total_completed, self.current_session.total_messages)
+                        
+                    except Exception as e:
+                        phone_data = future_to_data.get(future, ("unknown", "", None))
+                        phone = phone_data[0]
+                        result = MessageResult(phone, False, f"Timeout/Error: {str(e)}")
+                        batch_results.append(result)
+                        logger.error("message_processing_error", phone=phone, error=str(e))
+                        
+            except TimeoutError:
+                logger.warning("batch_timeout", batch_num=batch_num, timeout=300)
                 
-                try:
-                    result = future.result(timeout=60)  # 1 min timeout par message
-                    batch_results.append(result)
-                    
-                    # Mettre à jour la progression
-                    total_completed = self.current_session.completed + len(batch_results)
-                    self._update_progress(total_completed, self.current_session.total_messages)
-                    
-                except Exception as e:
+            # Gérer les futures non terminées
+            unfinished_futures = set(future_to_data.keys()) - completed_futures
+            if unfinished_futures:
+                logger.warning("unfinished_futures", count=len(unfinished_futures))
+                for future in unfinished_futures:
+                    future.cancel()
                     phone_data = future_to_data.get(future, ("unknown", "", None))
                     phone = phone_data[0]
-                    result = MessageResult(phone, False, f"Timeout/Error: {str(e)}")
+                    result = MessageResult(phone, False, "Timeout - task cancelled")
                     batch_results.append(result)
-                    logger.error("message_processing_error", phone=phone, error=str(e))
+        
+        # Marquer les envois réussis dans le tracker
+        for result in batch_results:
+            if result.success:
+                # Chercher les données correspondantes par numéro de téléphone
+                for phone_data in future_to_data.values():
+                    phone, message, image_path = phone_data
+                    if phone == result.phone:
+                        self.duplicate_tracker.mark_as_sent(phone, message, image_path, True)
+                        break
         
         logger.info("batch_completed", batch_num=batch_num, 
                    results_count=len(batch_results),
                    successful=sum(1 for r in batch_results if r.success))
         
         return batch_results
+    
+    def get_duplicate_stats(self) -> dict:
+        """Retourne les statistiques des doublons"""
+        return {
+            "sent_numbers_count": self.duplicate_tracker.get_sent_numbers_count(),
+            "total_messages_sent": self.duplicate_tracker.get_total_messages_sent()
+        }
+    
+    def reset_duplicate_history(self):
+        """Remet à zéro l'historique des envois"""
+        self.duplicate_tracker.reset_sent_history()
+    
+    def export_sent_numbers(self, file_path: str):
+        """Exporte la liste des numéros contactés"""
+        self.duplicate_tracker.export_sent_numbers(file_path)
+    
+    def split_messages_for_safety(self, messages_data: List[Tuple[str, str, Optional[str]]]) -> List[List[Tuple[str, str, Optional[str]]]]:
+        """
+        Divise une liste de messages en chunks de taille sécurisée
+        
+        Args:
+            messages_data: Liste des messages à diviser
+            
+        Returns:
+            Liste de chunks de messages
+        """
+        chunks = []
+        chunk_size = self.MAX_MESSAGES_PER_SESSION
+        
+        for i in range(0, len(messages_data), chunk_size):
+            chunk = messages_data[i:i + chunk_size]
+            chunks.append(chunk)
+            logger.info("message_chunk_created", 
+                       chunk_num=len(chunks), 
+                       chunk_size=len(chunk),
+                       total_chunks_planned=len(range(0, len(messages_data), chunk_size)))
+        
+        return chunks
+    
+    def get_max_messages_per_session(self) -> int:
+        """Retourne la limite maximale de messages par session"""
+        return self.MAX_MESSAGES_PER_SESSION
     
     def _send_message_with_retry(
         self, 
