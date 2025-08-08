@@ -203,7 +203,7 @@ class BulkSendDialog(ctk.CTkToplevel):
     
     def start_sending(self):
         """Démarre l'envoi en masse"""
-        if self.is_sending:
+        if self.is_sending or not self.winfo_exists():
             return
         
         try:
@@ -352,16 +352,27 @@ class BulkSendDialog(ctk.CTkToplevel):
         try:
             self.is_sending = False
             
+            # Vérifier que la fenêtre existe encore
+            if not self.winfo_exists():
+                return
+            
             # Mettre à jour l'interface
-            self.start_btn.configure(state="normal", text="🔄 Nouvel envoi")
-            self.pause_btn.configure(state="disabled")
-            self.stop_btn.configure(state="disabled")
+            try:
+                self.start_btn.configure(state="normal", text="🔄 Nouvel envoi")
+                self.pause_btn.configure(state="disabled")
+                self.stop_btn.configure(state="disabled")
+            except tk.TclError:
+                # La fenêtre a été fermée
+                return
             
             if self.current_session:
                 stats = self.bulk_sender.get_session_stats(self.current_session)
                 
                 if self.current_session.cancelled:
-                    self.progress_label.configure(text="🛑 Envoi annulé")
+                    try:
+                        self.progress_label.configure(text="🛑 Envoi annulé")
+                    except tk.TclError:
+                        return
                     messagebox.showwarning(
                         "Envoi annulé",
                         f"L'envoi a été annulé.\\n\\n"
@@ -370,7 +381,10 @@ class BulkSendDialog(ctk.CTkToplevel):
                         f"❌ Échecs: {stats.get('failed', 0)}"
                     )
                 else:
-                    self.progress_label.configure(text="✅ Envoi terminé avec succès!")
+                    try:
+                        self.progress_label.configure(text="✅ Envoi terminé avec succès!")
+                    except tk.TclError:
+                        return
                     
                     success_rate = stats.get('success_rate', 0)
                     if success_rate == 100:
@@ -397,11 +411,20 @@ class BulkSendDialog(ctk.CTkToplevel):
     def handle_error(self, error_message: str):
         """Gère les erreurs"""
         self.is_sending = False
-        self.start_btn.configure(state="normal")
-        self.pause_btn.configure(state="disabled")
-        self.stop_btn.configure(state="disabled")
         
-        self.progress_label.configure(text="❌ Erreur d'envoi")
+        # Vérifier que la fenêtre existe encore
+        if not self.winfo_exists():
+            return
+            
+        try:
+            self.start_btn.configure(state="normal")
+            self.pause_btn.configure(state="disabled")
+            self.stop_btn.configure(state="disabled")
+            self.progress_label.configure(text="❌ Erreur d'envoi")
+        except tk.TclError:
+            # La fenêtre a été fermée, pas de problème
+            return
+        
         messagebox.showerror("Erreur", error_message)
     
     def _format_time(self, seconds: float) -> str:

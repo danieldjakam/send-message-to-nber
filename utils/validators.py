@@ -15,7 +15,10 @@ class PhoneValidator:
         'international': r'^\+[1-9]\d{1,14}$',
         'french_mobile': r'^(?:\+33|0033|33)?[67]\d{8}$',
         'french_landline': r'^(?:\+33|0033|33)?[1-5]\d{8}$',
-        'whatsapp_format': r'^\d{10,15}$'  # Format WhatsApp sans préfixes
+        'cameroon_mobile': r'^(?:\+237|00237|237)?[6-9]\d{8}$',  # Numéros camerounais (6,7,8,9 + 8 chiffres)
+        'cameroon_local': r'^[6-9]\d{8}$',  # Format local camerounais 9 chiffres
+        'cameroon_alt': r'^67\d{8}$',  # Format alternatif 10 chiffres commençant par 67
+        'whatsapp_format': r'^\d{8,15}$'  # Format WhatsApp sans préfixes (modifié pour accepter 8+ chiffres)
     }
     
     @staticmethod
@@ -27,6 +30,16 @@ class PhoneValidator:
         # Nettoyer le numéro
         cleaned = PhoneValidator.clean_phone(phone)
         if not cleaned:
+            return False
+        
+        # Rejeter les numéros trop longs ou trop courts (ajusté pour Cameroun)
+        # Les numéros camerounais font 9 chiffres locaux ou 13 avec +237
+        digits_only = cleaned.replace('+', '')
+        if len(digits_only) > 15 or len(digits_only) < 9:
+            return False
+        
+        # Rejeter les numéros qui ne contiennent que des zéros ou des répétitions
+        if cleaned.replace('+', '').replace('0', '') == '' or len(set(cleaned.replace('+', ''))) <= 2:
             return False
         
         # Vérifier avec les différents patterns
@@ -53,6 +66,18 @@ class PhoneValidator:
         elif cleaned.startswith('0') and len(cleaned) == 10:
             # Numéro français sans indicatif
             cleaned = '+33' + cleaned[1:]
+        
+        # Gérer les formats camerounais
+        elif cleaned.startswith('00237'):
+            cleaned = '+237' + cleaned[5:]
+        elif cleaned.startswith('237') and len(cleaned) > 10:
+            cleaned = '+237' + cleaned[3:]
+        elif len(cleaned) == 9 and cleaned[0] in '6789':
+            # Numéro camerounais local (9 chiffres commençant par 6,7,8,9)
+            cleaned = '+237' + cleaned
+        elif len(cleaned) == 10 and cleaned.startswith('67'):
+            # Numéro camerounais alternatif (10 chiffres commençant par 67)
+            cleaned = '+237' + cleaned[1:]  # Supprimer le premier 6
         
         return cleaned
     

@@ -103,6 +103,9 @@ class WhatsAppClient:
                 'body': message
             }
             
+            # Log de debugging
+            logger.info("api_request_debug", phone=phone, url=url, payload_keys=list(payload.keys()))
+            
             response = requests.post(url, data=payload, timeout=self.text_timeout)
             
             if response.status_code == 200:
@@ -113,7 +116,9 @@ class WhatsAppClient:
                     logger.log_message_sent(phone, True, "text")
                     return MessageResult(phone, True, response_data=result_data)
                 else:
-                    error = result_data.get('message', 'Échec d\'envoi inconnu')
+                    # Log détaillé pour debugging
+                    logger.warning("api_response_debug", phone=phone, response_data=result_data)
+                    error = result_data.get('message', result_data.get('error', f'Échec d\'envoi inconnu - Réponse: {result_data}'))
                     logger.log_message_sent(phone, False, "text", error)
                     return MessageResult(phone, False, error=error, response_data=result_data)
             else:

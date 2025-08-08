@@ -4,7 +4,7 @@ Gestionnaire d'envoi en masse optimisé pour de gros volumes (10k+ messages)
 """
 import time
 import threading
-from typing import List, Dict, Callable, Optional, Tuple
+from typing import List, Dict, Callable, Optional, Tuple, Set
 from dataclasses import dataclass, asdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
@@ -43,11 +43,17 @@ class BulkSender:
         self.sessions_dir = Path.home() / ".excel_whatsapp" / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         
-        # Configuration pour gros volumes
-        self.max_workers = 3  # Limité pour éviter la surcharge
-        self.batch_delay = 2.0  # Délai entre les batches (secondes)
+        # Configuration pour gros volumes - SÉCURISÉE ANTI-BLOCAGE
+        self.max_workers = 1  # 1 seul thread pour éviter la surcharge
+        self.batch_delay = 5.0  # 5 secondes entre les batches
         self.retry_attempts = 2
         self.memory_cleanup_interval = 100  # Nettoyer la mémoire tous les 100 messages
+        
+        # Configuration des limites et pauses - ANTI-BLOCAGE
+        self.max_daily_limit = None  # Pas de limite quotidienne
+        self.message_burst_limit = 5  # 5 messages avant pause
+        self.burst_pause_duration = 60  # 1 minute entre chaque série (pour atteindre 8 min total)
+        self.message_delay = 90.0  # 90 secondes (1.5 minute) entre chaque message individuel
         
         # État de l'envoi
         self.current_session: Optional[SendingSession] = None
@@ -55,10 +61,15 @@ class BulkSender:
         self.is_cancelled = False
         self.progress_callback: Optional[Callable] = None
         self.status_callback: Optional[Callable] = None
+        self.sent_numbers: Set[str] = set()  # Numéros déjà contactés
+        self.sent_numbers_file = Path.home() / ".excel_whatsapp" / "sent_numbers.json"
         
         # File d'attente pour les résultats
         self.results_queue = queue.Queue()
         self.lock = threading.Lock()
+        
+        # Charger les numéros déjà contactés
+        self._load_sent_numbers()
     
     def send_bulk_optimized(
         self,
@@ -79,6 +90,14 @@ class BulkSender:
         self.progress_callback = progress_callback
         self.status_callback = status_callback
         
+        # Filtrer les numéros déjà contactés
+        filtered_messages = self._filter_already_sent(messages_data)
+        
+        # Plus de limite quotidienne
+        if self.max_daily_limit and len(filtered_messages) > self.max_daily_limit:
+            self._update_status(f"Limite de {self.max_daily_limit} messages appliquée")
+            filtered_messages = filtered_messages[:self.max_daily_limit]
+        
         # Créer ou reprendre une session
         if resume_session_id:
             session = self._load_session(resume_session_id)
@@ -88,7 +107,7 @@ class BulkSender:
             session_id = f"bulk_send_{int(time.time())}"
             session = SendingSession(
                 session_id=session_id,
-                total_messages=len(messages_data),
+                total_messages=len(filtered_messages),
                 start_time=time.time()
             )
         
@@ -101,7 +120,7 @@ class BulkSender:
                        batch_size=self.batch_size)
             
             # Diviser en batches
-            batches = self._create_batches(messages_data, session.current_batch)
+            batches = self._create_batches(filtered_messages, session.current_batch)
             
             for batch_num, batch in enumerate(batches, start=session.current_batch):
                 if self.is_cancelled:
@@ -115,8 +134,8 @@ class BulkSender:
                 
                 self._update_status(f"Traitement du batch {batch_num + 1}/{len(batches) + session.current_batch}")
                 
-                # Traiter le batch
-                batch_results = self._process_batch(batch, batch_num)
+                # Traiter le batch avec contrôle de limite
+                batch_results = self._process_batch_with_limits(batch, batch_num)
                 self._update_session_with_results(session, batch_results)
                 
                 # Nettoyer la mémoire périodiquement
@@ -138,8 +157,9 @@ class BulkSender:
                 duration
             )
             
-            # Sauvegarder l'état final
+            # Sauvegarder l'état final et les numéros contactés
             self._save_session(session)
+            self._save_sent_numbers()
             
             return session
             
@@ -166,9 +186,10 @@ class BulkSender:
         
         return batches
     
-    def _process_batch(self, batch: List[Tuple], batch_num: int) -> List[MessageResult]:
-        """Traite un batch de messages avec gestion d'erreurs robuste"""
+    def _process_batch_with_limits(self, batch: List[Tuple], batch_num: int) -> List[MessageResult]:
+        """Traite un batch de messages avec gestion des limites et pauses"""
         batch_results = []
+        messages_sent_in_burst = 0
         
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             # Soumettre toutes les tâches du batch
@@ -208,6 +229,20 @@ class BulkSender:
                     result = future.result(timeout=60)  # 1 min timeout par message
                     batch_results.append(result)
                     
+                    # Si le message a été envoyé avec succès, ajouter le numéro à la liste
+                    if result.success:
+                        self.sent_numbers.add(result.phone)
+                        messages_sent_in_burst += 1
+                        
+                        # Délai entre chaque message pour éviter le blocage
+                        time.sleep(self.message_delay)
+                        
+                        # Pause après X messages envoyés
+                        if messages_sent_in_burst >= self.message_burst_limit:
+                            self._update_status(f"Pause de {self.burst_pause_duration//60} minutes après {self.message_burst_limit} messages")
+                            time.sleep(self.burst_pause_duration)
+                            messages_sent_in_burst = 0
+                    
                     # Mettre à jour la progression
                     total_completed = self.current_session.completed + len(batch_results)
                     self._update_progress(total_completed, self.current_session.total_messages)
@@ -222,6 +257,9 @@ class BulkSender:
         logger.info("batch_completed", batch_num=batch_num, 
                    results_count=len(batch_results),
                    successful=sum(1 for r in batch_results if r.success))
+        
+        # Sauvegarder les numéros contactés après chaque batch
+        self._save_sent_numbers()
         
         return batch_results
     
@@ -406,3 +444,89 @@ class BulkSender:
             logger.error("sessions_directory_error", error=str(e))
         
         return sorted(sessions, key=lambda x: x['start_time'], reverse=True)
+    
+    def _filter_already_sent(self, messages_data: List[Tuple[str, str, Optional[str]]]) -> List[Tuple[str, str, Optional[str]]]:
+        """Filtre les messages pour les numéros déjà contactés"""
+        filtered = []
+        skipped_count = 0
+        
+        for phone, message, image_path in messages_data:
+            # Normaliser le numéro pour la comparaison
+            normalized_phone = self._normalize_phone(phone)
+            
+            if normalized_phone not in self.sent_numbers:
+                filtered.append((phone, message, image_path))
+            else:
+                skipped_count += 1
+                logger.info("phone_already_contacted", phone=phone)
+        
+        if skipped_count > 0:
+            self._update_status(f"{skipped_count} numéros déjà contactés ignorés")
+            logger.info("filtered_already_sent", skipped=skipped_count, remaining=len(filtered))
+        
+        return filtered
+    
+    def _normalize_phone(self, phone: str) -> str:
+        """Normalise un numéro de téléphone pour la comparaison"""
+        # Supprimer tous les caractères non numériques sauf le +
+        normalized = ''.join(c for c in phone if c.isdigit() or c == '+')
+        
+        # Si le numéro commence par +, le garder tel quel
+        if normalized.startswith('+'):
+            return normalized
+        
+        # Si le numéro commence par 00, remplacer par +
+        if normalized.startswith('00'):
+            return '+' + normalized[2:]
+        
+        return normalized
+    
+    def _load_sent_numbers(self):
+        """Charge la liste des numéros déjà contactés"""
+        try:
+            if self.sent_numbers_file.exists():
+                with open(self.sent_numbers_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.sent_numbers = set(data.get('sent_numbers', []))
+                    logger.info("sent_numbers_loaded", count=len(self.sent_numbers))
+            else:
+                self.sent_numbers = set()
+                logger.info("sent_numbers_file_not_found", creating_new=True)
+        except Exception as e:
+            logger.error("sent_numbers_load_error", error=str(e))
+            self.sent_numbers = set()
+    
+    def _save_sent_numbers(self):
+        """Sauvegarde la liste des numéros contactés"""
+        try:
+            # Créer le répertoire si nécessaire
+            self.sent_numbers_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            data = {
+                'sent_numbers': list(self.sent_numbers),
+                'last_updated': time.time(),
+                'total_count': len(self.sent_numbers)
+            }
+            
+            with open(self.sent_numbers_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                
+            logger.info("sent_numbers_saved", count=len(self.sent_numbers))
+            
+        except Exception as e:
+            logger.error("sent_numbers_save_error", error=str(e))
+    
+    def get_sent_numbers_count(self) -> int:
+        """Retourne le nombre de numéros déjà contactés"""
+        return len(self.sent_numbers)
+    
+    def clear_sent_numbers(self):
+        """Efface la liste des numéros contactés (pour les tests)"""
+        self.sent_numbers.clear()
+        self._save_sent_numbers()
+        logger.info("sent_numbers_cleared")
+    
+    def is_phone_already_sent(self, phone: str) -> bool:
+        """Vérifie si un numéro a déjà été contacté"""
+        normalized_phone = self._normalize_phone(phone)
+        return normalized_phone in self.sent_numbers

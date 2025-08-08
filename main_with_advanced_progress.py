@@ -28,6 +28,7 @@ from ui.components import (
 )
 from ui.bulk_send_dialog import BulkSendDialog
 from ui.progress_widgets import DetailedProgressDialog, SimpleProgressOverlay
+from ui.sent_numbers_dialog import SentNumbersDialog
 
 # Configuration globale
 ctk.set_appearance_mode("dark")
@@ -308,7 +309,29 @@ class ExcelWhatsAppApp:
             width=100,
             font=ctk.CTkFont(size=11, weight="bold")
         )
-        test_btn.pack(side='left', padx=(0, 10))
+        test_btn.pack(side='left', padx=(0, 5))
+        
+        history_btn = ctk.CTkButton(
+            action_buttons, 
+            text="📚 Historique", 
+            command=self.show_sent_numbers_dialog,
+            height=35, 
+            width=90,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            fg_color=("#8B4513", "#A0522D")
+        )
+        history_btn.pack(side='left', padx=(0, 3))
+        
+        config_btn = ctk.CTkButton(
+            action_buttons, 
+            text="⚙️ Config", 
+            command=self.show_config_dialog,
+            height=35, 
+            width=80,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            fg_color=("#4B0082", "#6A0DAD")
+        )
+        config_btn.pack(side='left', padx=(0, 5))
         
         self.send_btn = ctk.CTkButton(
             action_buttons, 
@@ -370,6 +393,17 @@ class ExcelWhatsAppApp:
             font=ctk.CTkFont(size=11)
         )
         deselect_all_btn.pack(side='left', padx=(0, 5))
+        
+        validate_btn = ctk.CTkButton(
+            action_frame, 
+            text="📱 Valider numéros", 
+            command=self.validate_phone_numbers,
+            height=30,
+            width=120,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=("#FF8C00", "#FF4500")
+        )
+        validate_btn.pack(side='right', padx=(0, 10))
         
         show_data_btn = ctk.CTkButton(
             action_frame, 
@@ -688,6 +722,79 @@ class ExcelWhatsAppApp:
             logger.error("data_display_error", error=str(e))
             messagebox.showerror("Erreur", error_msg)
     
+    def validate_phone_numbers(self):
+        """Valide les numéros de téléphone dans le fichier chargé"""
+        if self.df is None or self.df.empty:
+            self.status_indicator.set_status('error', 'Aucune donnée chargée')
+            messagebox.showerror("Erreur", "Veuillez d'abord charger un fichier Excel.")
+            return
+        
+        phone_column = self.phone_column.get()
+        if not phone_column or phone_column not in self.df.columns:
+            self.status_indicator.set_status('warning', 'Colonne manquante')
+            messagebox.showwarning("Attention", "Veuillez sélectionner une colonne de numéros de téléphone.")
+            return
+        
+        try:
+            total_phones = 0
+            valid_phones = 0
+            invalid_phones = []
+            
+            for idx, row in self.df.iterrows():
+                phone_raw = str(row[phone_column]).strip()
+                
+                if not phone_raw or phone_raw.lower() in ['nan', 'none', '']:
+                    continue
+                
+                total_phones += 1
+                
+                if PhoneValidator.is_valid_phone(phone_raw):
+                    valid_phones += 1
+                else:
+                    invalid_phones.append({
+                        'ligne': idx + 2,  # +2 car Excel commence à 1 et il y a l'en-tête
+                        'numero': phone_raw
+                    })
+            
+            invalid_count = len(invalid_phones)
+            valid_percentage = (valid_phones / total_phones * 100) if total_phones > 0 else 0
+            
+            # Préparer le rapport
+            report_msg = f"📊 Rapport de validation des numéros\\n\\n"
+            report_msg += f"📱 Total analysé: {total_phones} numéros\\n"
+            report_msg += f"✅ Valides: {valid_phones} ({valid_percentage:.1f}%)\\n"
+            report_msg += f"❌ Invalides: {invalid_count}\\n\\n"
+            
+            if invalid_count > 0:
+                report_msg += f"🔍 Premiers numéros invalides:\\n"
+                for i, invalid in enumerate(invalid_phones[:5]):  # Montrer les 5 premiers
+                    report_msg += f"  • Ligne {invalid['ligne']}: {invalid['numero']}\\n"
+                
+                if invalid_count > 5:
+                    report_msg += f"  ... et {invalid_count - 5} autres\\n"
+                
+                report_msg += f"\\n💡 Ces numéros seront automatiquement ignorés lors de l'envoi."
+            
+            # Afficher le rapport
+            if invalid_count == 0:
+                messagebox.showinfo("✅ Validation réussie", report_msg)
+                self.status_indicator.set_status('success', f'Tous les numéros sont valides')
+            else:
+                messagebox.showwarning("⚠️ Numéros invalides détectés", report_msg)
+                self.status_indicator.set_status('warning', f'{invalid_count} numéros invalides')
+            
+            logger.info("phone_validation_completed", 
+                       total=total_phones, 
+                       valid=valid_phones, 
+                       invalid=invalid_count,
+                       valid_percentage=valid_percentage)
+                       
+        except Exception as e:
+            error_msg = f"Erreur lors de la validation: {str(e)}"
+            self.status_indicator.set_status('error', 'Erreur de validation')
+            logger.error("phone_validation_error", error=str(e))
+            messagebox.showerror("Erreur", error_msg)
+    
     def display_data(self, columns: List[str]):
         """Affiche les données sélectionnées dans un tableau moderne"""
         self.data_section.pack(fill='both', expand=True, padx=30, pady=10)
@@ -916,16 +1023,22 @@ class ExcelWhatsAppApp:
             
             # Mettre à jour les statistiques finales dans le dialog
             stats = self.bulk_sender.get_session_stats(session)
-            self.detailed_progress.set_success_count(session.successful)
-            self.detailed_progress.set_error_count(session.failed)
+            
+            # Utiliser les stats pour éviter les erreurs d'attributs
+            failed_count = stats.get('failed', session.failed if hasattr(session, 'failed') else 0)
+            successful_count = stats.get('successful', session.successful if hasattr(session, 'successful') else 0)
+            total_count = stats.get('total', session.total_messages if hasattr(session, 'total_messages') else 0)
+            
+            self.detailed_progress.set_success_count(successful_count)
+            self.detailed_progress.set_error_count(failed_count)
             
             # Ajouter un log de fin
-            if session.failed == 0:
+            if failed_count == 0:
                 self.detailed_progress.add_log("✅ Envoi terminé avec succès !")
-                self.status_indicator.set_status('success', f"Envoi terminé: {session.successful}/{session.total_messages}")
+                self.status_indicator.set_status('success', f"Envoi terminé: {successful_count}/{total_count}")
             else:
-                self.detailed_progress.add_log(f"⚠️ Envoi terminé avec {session.failed} erreurs")
-                self.status_indicator.set_status('warning', f"Envoi terminé avec erreurs: {session.successful}/{session.total_messages}")
+                self.detailed_progress.add_log(f"⚠️ Envoi terminé avec {failed_count} erreurs")
+                self.status_indicator.set_status('warning', f"Envoi terminé avec erreurs: {successful_count}/{total_count}")
             
         except Exception as e:
             logger.error("detailed_bulk_send_results_error", error=str(e))
@@ -953,10 +1066,15 @@ class ExcelWhatsAppApp:
             stats = self.bulk_sender.get_session_stats(session)
             self._show_simple_sending_report(stats)
             
-            if session.failed == 0:
-                self.status_indicator.set_status('success', f"Envoi terminé: {session.successful}/{session.total_messages}")
+            # Utiliser les stats plutôt que les attributs directs
+            failed_count = stats.get('failed', session.failed if hasattr(session, 'failed') else 0)
+            successful_count = stats.get('successful', session.successful if hasattr(session, 'successful') else 0)
+            total_count = stats.get('total', session.total_messages if hasattr(session, 'total_messages') else 0)
+            
+            if failed_count == 0:
+                self.status_indicator.set_status('success', f"Envoi terminé: {successful_count}/{total_count}")
             else:
-                self.status_indicator.set_status('warning', f"Envoi terminé avec erreurs: {session.successful}/{session.total_messages}")
+                self.status_indicator.set_status('warning', f"Envoi terminé avec erreurs: {successful_count}/{total_count}")
         
         except Exception as e:
             logger.error("simple_bulk_send_results_error", error=str(e))
@@ -1168,6 +1286,116 @@ class ExcelWhatsAppApp:
         """Sauvegarde automatique lors des changements"""
         self.root.after_idle(self.save_config)
     
+    def show_sent_numbers_dialog(self):
+        """Affiche le dialog de gestion des numéros envoyés"""
+        try:
+            if not self.bulk_sender:
+                if not self.whatsapp_client:
+                    # Créer une instance temporaire juste pour accéder aux numéros
+                    from api.bulk_sender import BulkSender
+                    from api.whatsapp_client import WhatsAppClient
+                    temp_client = WhatsAppClient("temp", "temp")
+                    self.bulk_sender = BulkSender(temp_client)
+                else:
+                    self.bulk_sender = BulkSender(self.whatsapp_client)
+            
+            # Créer le dialog
+            dialog = SentNumbersDialog(self.root, self.bulk_sender)
+            
+        except Exception as e:
+            error_msg = f"Erreur lors de l'ouverture de l'historique: {str(e)}"
+            logger.error("sent_numbers_dialog_error", error=str(e))
+            messagebox.showerror("❌ Erreur", error_msg)
+    
+    def show_config_dialog(self):
+        """Affiche le dialog de configuration des paramètres d'envoi"""
+        try:
+            if not self.bulk_sender:
+                if not self.whatsapp_client:
+                    from api.bulk_sender import BulkSender
+                    from api.whatsapp_client import WhatsAppClient
+                    temp_client = WhatsAppClient("temp", "temp")
+                    self.bulk_sender = BulkSender(temp_client)
+                else:
+                    self.bulk_sender = BulkSender(self.whatsapp_client)
+            
+            # Dialog simple pour la configuration
+            dialog = ctk.CTkToplevel(self.root)
+            dialog.title("⚙️ Configuration d'Envoi")
+            dialog.geometry("500x400")
+            dialog.resizable(False, False)
+            dialog.transient(self.root)
+            dialog.grab_set()
+            
+            # Centrer la fenêtre
+            x = (dialog.winfo_screenwidth() // 2) - (250)
+            y = (dialog.winfo_screenheight() // 2) - (200)
+            dialog.geometry(f"500x400+{x}+{y}")
+            
+            # Titre
+            title_label = ctk.CTkLabel(
+                dialog,
+                text="⚙️ Configuration des Paramètres d'Envoi",
+                font=ctk.CTkFont(size=18, weight="bold")
+            )
+            title_label.pack(pady=20)
+            
+            # Frame principal
+            main_frame = ctk.CTkFrame(dialog, corner_radius=15)
+            main_frame.pack(fill='both', expand=True, padx=20, pady=(0, 20))
+            
+            # Configuration actuelle
+            current_frame = ctk.CTkFrame(main_frame, corner_radius=10)
+            current_frame.pack(fill='x', padx=20, pady=20)
+            
+            ctk.CTkLabel(
+                current_frame,
+                text="📊 Configuration Actuelle",
+                font=ctk.CTkFont(size=14, weight="bold")
+            ).pack(pady=(10, 5))
+            
+            config_text = f"""
+🚀 Messages par série: {self.bulk_sender.message_burst_limit}
+⏰ Pause entre séries: {self.bulk_sender.burst_pause_duration//60} minutes
+🕒 Délai entre messages: {self.bulk_sender.message_delay} secondes
+📊 Limite quotidienne: {'Aucune' if not self.bulk_sender.max_daily_limit else self.bulk_sender.max_daily_limit}
+📱 Numéros déjà contactés: {self.bulk_sender.get_sent_numbers_count()}
+            """
+            
+            ctk.CTkLabel(
+                current_frame,
+                text=config_text.strip(),
+                font=ctk.CTkFont(size=12),
+                justify='left'
+            ).pack(pady=(0, 10))
+            
+            # Status
+            status_frame = ctk.CTkFrame(main_frame, corner_radius=10, fg_color=("#2E8B57", "#228B22"))
+            status_frame.pack(fill='x', padx=20, pady=(0, 10))
+            
+            ctk.CTkLabel(
+                status_frame,
+                text="✅ Configuration Optimisée Anti-Blocage",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color="white"
+            ).pack(pady=10)
+            
+            # Bouton fermer
+            ctk.CTkButton(
+                main_frame,
+                text="❌ Fermer",
+                command=dialog.destroy,
+                height=35,
+                width=100
+            ).pack(pady=20)
+            
+            dialog.focus()
+            
+        except Exception as e:
+            error_msg = f"Erreur lors de l'ouverture de la configuration: {str(e)}"
+            logger.error("config_dialog_error", error=str(e))
+            messagebox.showerror("❌ Erreur", error_msg)
+    
     def on_closing(self):
         """Gestionnaire de fermeture de l'application"""
         try:
@@ -1187,6 +1415,27 @@ class ExcelWhatsAppApp:
         
         finally:
             self.root.destroy()
+    
+    def show_sent_numbers_dialog(self):
+        """Affiche le dialog de gestion des numéros envoyés"""
+        try:
+            if not self.bulk_sender:
+                if not self.whatsapp_client:
+                    # Créer une instance temporaire juste pour accéder aux numéros
+                    from api.bulk_sender import BulkSender
+                    from api.whatsapp_client import WhatsAppClient
+                    temp_client = WhatsAppClient("temp", "temp")
+                    self.bulk_sender = BulkSender(temp_client)
+                else:
+                    self.bulk_sender = BulkSender(self.whatsapp_client)
+            
+            # Créer le dialog
+            dialog = SentNumbersDialog(self.root, self.bulk_sender)
+            
+        except Exception as e:
+            error_msg = f"Erreur lors de l'ouverture de l'historique: {str(e)}"
+            logger.error("sent_numbers_dialog_error", error=str(e))
+            messagebox.showerror("❌ Erreur", error_msg)
 
 
 def main():
