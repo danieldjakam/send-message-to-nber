@@ -28,6 +28,7 @@ class BulkSendDialog(ctk.CTkToplevel):
         
         # Variables d'état
         self.is_sending = False
+        self.is_destroyed = False  # Flag pour éviter les erreurs après fermeture
         self.last_update_time = 0
         self.update_interval = 0.5  # Mettre à jour l'UI toutes les 0.5 secondes
         
@@ -215,9 +216,7 @@ class BulkSendDialog(ctk.CTkToplevel):
             self.current_session = None
             
             # Mettre à jour l'interface
-            self.start_btn.configure(state="disabled")
-            self.pause_btn.configure(state="normal")
-            self.stop_btn.configure(state="normal")
+            self._safe_configure_buttons(start_state="disabled", pause_state="normal", stop_state="normal")
             
             # Démarrer l'envoi dans un thread séparé
             self.sending_thread = threading.Thread(
@@ -287,11 +286,11 @@ class BulkSendDialog(ctk.CTkToplevel):
         try:
             # Barre de progression
             progress = completed / total if total > 0 else 0
-            self.progress_bar.set(progress)
+            self._safe_update_progress_bar(progress)
             
             # Label principal
             percentage = progress * 100
-            self.progress_label.configure(text=f"{status} - {percentage:.1f}%")
+            self._safe_update_progress_label(f"{status} - {percentage:.1f}%")
             
             # Statistiques détaillées
             if self.current_session:
@@ -315,7 +314,40 @@ class BulkSendDialog(ctk.CTkToplevel):
     
     def update_status(self, message: str):
         """Met à jour le statut (appelé depuis le thread d'envoi)"""
-        self.after(0, lambda: self.progress_label.configure(text=message))
+        if not self.is_destroyed:
+            try:
+                self.after(0, lambda: self._safe_update_progress_label(message))
+            except Exception as e:
+                logger.error("status_update_error", error=str(e))
+    
+    def _safe_update_progress_label(self, message: str):
+        """Met à jour le label de progression de manière sécurisée"""
+        try:
+            if not self.is_destroyed and hasattr(self, 'progress_label') and self.progress_label.winfo_exists():
+                self.progress_label.configure(text=message)
+        except Exception as e:
+            logger.error("progress_label_update_error", error=str(e))
+    
+    def _safe_update_progress_bar(self, progress: float):
+        """Met à jour la barre de progression de manière sécurisée"""
+        try:
+            if not self.is_destroyed and hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
+                self.progress_bar.set(progress)
+        except Exception as e:
+            logger.error("progress_bar_update_error", error=str(e))
+    
+    def _safe_configure_buttons(self, start_state="normal", pause_state="disabled", stop_state="disabled"):
+        """Configure les boutons de manière sécurisée"""
+        try:
+            if not self.is_destroyed:
+                if hasattr(self, 'start_btn') and self.start_btn.winfo_exists():
+                    self.start_btn.configure(state=start_state)
+                if hasattr(self, 'pause_btn') and self.pause_btn.winfo_exists():
+                    self.pause_btn.configure(state=pause_state)
+                if hasattr(self, 'stop_btn') and self.stop_btn.winfo_exists():
+                    self.stop_btn.configure(state=stop_state)
+        except Exception as e:
+            logger.error("buttons_config_error", error=str(e))
     
     def toggle_pause(self):
         """Bascule entre pause et reprise"""
@@ -358,9 +390,12 @@ class BulkSendDialog(ctk.CTkToplevel):
             
             # Mettre à jour l'interface
             try:
-                self.start_btn.configure(state="normal", text="🔄 Nouvel envoi")
-                self.pause_btn.configure(state="disabled")
-                self.stop_btn.configure(state="disabled")
+                try:
+                    if hasattr(self, 'start_btn') and self.start_btn.winfo_exists():
+                        self.start_btn.configure(state="normal", text="🔄 Nouvel envoi")
+                except Exception:
+                    pass
+                self._safe_configure_buttons(start_state="normal", pause_state="disabled", stop_state="disabled")
             except tk.TclError:
                 # La fenêtre a été fermée
                 return
@@ -370,7 +405,7 @@ class BulkSendDialog(ctk.CTkToplevel):
                 
                 if self.current_session.cancelled:
                     try:
-                        self.progress_label.configure(text="🛑 Envoi annulé")
+                        self._safe_update_progress_label("🛑 Envoi annulé")
                     except tk.TclError:
                         return
                     messagebox.showwarning(
@@ -382,7 +417,7 @@ class BulkSendDialog(ctk.CTkToplevel):
                     )
                 else:
                     try:
-                        self.progress_label.configure(text="✅ Envoi terminé avec succès!")
+                        self._safe_update_progress_label("✅ Envoi terminé avec succès!")
                     except tk.TclError:
                         return
                     
@@ -416,14 +451,8 @@ class BulkSendDialog(ctk.CTkToplevel):
         if not self.winfo_exists():
             return
             
-        try:
-            self.start_btn.configure(state="normal")
-            self.pause_btn.configure(state="disabled")
-            self.stop_btn.configure(state="disabled")
-            self.progress_label.configure(text="❌ Erreur d'envoi")
-        except tk.TclError:
-            # La fenêtre a été fermée, pas de problème
-            return
+        self._safe_configure_buttons(start_state="normal", pause_state="disabled", stop_state="disabled")
+        self._safe_update_progress_label("❌ Erreur d'envoi")
         
         messagebox.showerror("Erreur", error_message)
     
@@ -451,5 +480,15 @@ class BulkSendDialog(ctk.CTkToplevel):
             else:
                 return
         
-        self.grab_release()
-        self.destroy()
+        # Marquer comme détruit pour éviter les erreurs d'UI
+        self.is_destroyed = True
+        
+        try:
+            self.grab_release()
+        except Exception:
+            pass  # Ignore si déjà relâché
+            
+        try:
+            self.destroy()
+        except Exception:
+            pass  # Ignore si déjà détruit

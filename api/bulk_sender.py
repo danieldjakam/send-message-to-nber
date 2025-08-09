@@ -6,7 +6,7 @@ import time
 import threading
 from typing import List, Dict, Callable, Optional, Tuple, Set
 from dataclasses import dataclass, asdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import queue
@@ -43,17 +43,17 @@ class BulkSender:
         self.sessions_dir = Path.home() / ".excel_whatsapp" / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         
-        # Configuration pour gros volumes - SÉCURISÉE ANTI-BLOCAGE
+        # Configuration pour gros volumes - OPTIMISÉE ET SÉCURISÉE
         self.max_workers = 1  # 1 seul thread pour éviter la surcharge
-        self.batch_delay = 5.0  # 5 secondes entre les batches
+        self.batch_delay = 2.0  # 2 secondes entre les batches (au lieu de 5)
         self.retry_attempts = 2
         self.memory_cleanup_interval = 100  # Nettoyer la mémoire tous les 100 messages
         
-        # Configuration des limites et pauses - ANTI-BLOCAGE
+        # Configuration des limites et pauses - OPTIMISÉE MAIS SÉCURISÉE
         self.max_daily_limit = None  # Pas de limite quotidienne
-        self.message_burst_limit = 5  # 5 messages avant pause
-        self.burst_pause_duration = 60  # 1 minute entre chaque série (pour atteindre 8 min total)
-        self.message_delay = 90.0  # 90 secondes (1.5 minute) entre chaque message individuel
+        self.message_burst_limit = 1  # 1 message avant pause (pour respecter le délai de 5 min)
+        self.burst_pause_duration = 30  # 30 secondes entre chaque série (au lieu de 60)
+        self.message_delay = 300.0  # 5 minutes entre chaque message
         
         # État de l'envoi
         self.current_session: Optional[SendingSession] = None
@@ -68,8 +68,41 @@ class BulkSender:
         self.results_queue = queue.Queue()
         self.lock = threading.Lock()
         
-        # Charger les numéros déjà contactés
+        # Charger les numéros déjà contactés et la configuration
         self._load_sent_numbers()
+        self._load_sending_config()
+    
+    def configure_sending_parameters(self, 
+                                   message_delay: float = None,
+                                   burst_limit: int = None, 
+                                   burst_pause: int = None):
+        """Configure les paramètres d'envoi pour ajuster la vitesse"""
+        if message_delay is not None:
+            self.message_delay = max(1.0, message_delay)  # Minimum 1 seconde
+            
+        if burst_limit is not None:
+            self.message_burst_limit = max(1, burst_limit)  # Minimum 1 message
+            
+        if burst_pause is not None:
+            self.burst_pause_duration = max(5, burst_pause)  # Minimum 5 secondes
+        
+        # Sauvegarde automatique des paramètres
+        self._save_sending_config()
+            
+        logger.info("bulk_sender_config_updated",
+                   message_delay=self.message_delay,
+                   burst_limit=self.message_burst_limit,
+                   burst_pause=self.burst_pause_duration)
+    
+    def get_sending_configuration(self) -> dict:
+        """Retourne la configuration actuelle d'envoi"""
+        return {
+            "message_delay": self.message_delay,
+            "burst_limit": self.message_burst_limit,
+            "burst_pause_duration": self.burst_pause_duration,
+            "batch_delay": self.batch_delay,
+            "batch_size": self.batch_size
+        }
     
     def send_bulk_optimized(
         self,
@@ -187,72 +220,51 @@ class BulkSender:
         return batches
     
     def _process_batch_with_limits(self, batch: List[Tuple], batch_num: int) -> List[MessageResult]:
-        """Traite un batch de messages avec gestion des limites et pauses"""
+        """Traite un batch de messages avec gestion des limites et pauses - ENVOI SÉQUENTIEL"""
         batch_results = []
         messages_sent_in_burst = 0
         
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Soumettre toutes les tâches du batch
-            future_to_data = {}
+        # Traitement séquentiel pour respecter les délais
+        for i, (phone, message, image_path) in enumerate(batch):
+            if self.is_cancelled:
+                break
             
-            for phone, message, image_path in batch:
-                if self.is_cancelled:
-                    break
+            try:
+                # Appliquer le délai AVANT l'envoi (sauf pour le premier message du batch)
+                if i > 0:  # Pas de délai pour le premier message du premier batch
+                    self._countdown_wait(int(self.message_delay), "⏱️ Délai anti-spam")
                 
-                try:
-                    if image_path:
-                        future = executor.submit(
-                            self._send_message_with_retry,
-                            'image', phone, message, image_path
-                        )
-                    else:
-                        future = executor.submit(
-                            self._send_message_with_retry,
-                            'text', phone, message
-                        )
-                    
-                    future_to_data[future] = (phone, message, image_path)
-                    
-                except Exception as e:
-                    # Erreur lors de la soumission
-                    result = MessageResult(phone, False, str(e))
-                    batch_results.append(result)
-                    logger.error("task_submission_error", phone=phone, error=str(e))
-            
-            # Collecter les résultats
-            for future in as_completed(future_to_data, timeout=300):  # 5 min timeout par batch
-                if self.is_cancelled:
-                    future.cancel()
-                    continue
+                # Envoyer le message
+                if image_path:
+                    result = self._send_message_with_retry('image', phone, message, image_path)
+                else:
+                    result = self._send_message_with_retry('text', phone, message)
                 
-                try:
-                    result = future.result(timeout=60)  # 1 min timeout par message
-                    batch_results.append(result)
+                batch_results.append(result)
+                
+                # Si le message a été envoyé avec succès
+                if result.success:
+                    self.sent_numbers.add(result.phone)
+                    messages_sent_in_burst += 1
                     
-                    # Si le message a été envoyé avec succès, ajouter le numéro à la liste
-                    if result.success:
-                        self.sent_numbers.add(result.phone)
-                        messages_sent_in_burst += 1
-                        
-                        # Délai entre chaque message pour éviter le blocage
-                        time.sleep(self.message_delay)
-                        
-                        # Pause après X messages envoyés
-                        if messages_sent_in_burst >= self.message_burst_limit:
-                            self._update_status(f"Pause de {self.burst_pause_duration//60} minutes après {self.message_burst_limit} messages")
+                    # Pause après X messages envoyés (burst limit)
+                    if messages_sent_in_burst >= self.message_burst_limit:
+                        if self.burst_pause_duration > 0:
+                            pause_minutes = int(self.burst_pause_duration // 60)
+                            pause_seconds = int(self.burst_pause_duration % 60)
+                            self._update_status(f"⏸️ Pause de {pause_minutes}min {pause_seconds}s après {self.message_burst_limit} messages")
                             time.sleep(self.burst_pause_duration)
-                            messages_sent_in_burst = 0
-                    
-                    # Mettre à jour la progression
-                    total_completed = self.current_session.completed + len(batch_results)
-                    self._update_progress(total_completed, self.current_session.total_messages)
-                    
-                except Exception as e:
-                    phone_data = future_to_data.get(future, ("unknown", "", None))
-                    phone = phone_data[0]
-                    result = MessageResult(phone, False, f"Timeout/Error: {str(e)}")
-                    batch_results.append(result)
-                    logger.error("message_processing_error", phone=phone, error=str(e))
+                        messages_sent_in_burst = 0
+                
+                # Mettre à jour la progression après chaque message
+                total_completed = self.current_session.completed + len(batch_results)
+                self._update_progress(total_completed, self.current_session.total_messages)
+                
+            except Exception as e:
+                # Erreur lors de l'envoi
+                result = MessageResult(phone, False, str(e))
+                batch_results.append(result)
+                logger.error("message_send_error", phone=phone, error=str(e))
         
         logger.info("batch_completed", batch_num=batch_num, 
                    results_count=len(batch_results),
@@ -530,3 +542,69 @@ class BulkSender:
         """Vérifie si un numéro a déjà été contacté"""
         normalized_phone = self._normalize_phone(phone)
         return normalized_phone in self.sent_numbers
+    
+    def _save_sending_config(self):
+        """Sauvegarde automatique de la configuration d'envoi"""
+        try:
+            config_file = Path.home() / ".excel_whatsapp" / "sending_config.json"
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            config = {
+                "message_delay": self.message_delay,
+                "message_burst_limit": self.message_burst_limit,
+                "burst_pause_duration": self.burst_pause_duration,
+                "batch_delay": self.batch_delay,
+                "last_updated": time.time()
+            }
+            
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2)
+                
+        except Exception as e:
+            logger.error("config_save_error", error=str(e))
+    
+    def _load_sending_config(self):
+        """Charge la configuration d'envoi sauvegardée"""
+        try:
+            config_file = Path.home() / ".excel_whatsapp" / "sending_config.json"
+            
+            if config_file.exists():
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                
+                # Appliquer la configuration chargée
+                self.message_delay = max(1.0, config.get("message_delay", self.message_delay))
+                self.message_burst_limit = max(1, config.get("message_burst_limit", self.message_burst_limit))
+                self.burst_pause_duration = max(5, config.get("burst_pause_duration", self.burst_pause_duration))
+                self.batch_delay = max(0.5, config.get("batch_delay", self.batch_delay))
+                
+                logger.info("config_loaded",
+                           message_delay=self.message_delay,
+                           burst_limit=self.message_burst_limit,
+                           burst_pause=self.burst_pause_duration)
+                
+        except Exception as e:
+            logger.error("config_load_error", error=str(e))
+    
+    def _countdown_wait(self, seconds: int, status_prefix: str):
+        """
+        Compte à rebours visuel pour l'attente avec mise à jour temps réel
+        """
+        for remaining in range(seconds, 0, -1):
+            if self.is_cancelled:  # Arrêter si l'envoi est annulé
+                break
+            
+            minutes = remaining // 60
+            secs = remaining % 60
+            
+            if minutes > 0:
+                time_text = f"{minutes}min {secs}s"
+            else:
+                time_text = f"{secs}s"
+            
+            self._update_status(f"{status_prefix} - Reste: {time_text}")
+            time.sleep(1)
+        
+        # Indiquer que l'attente est terminée
+        if not self.is_cancelled:
+            self._update_status(f"{status_prefix} - Terminé ✅")

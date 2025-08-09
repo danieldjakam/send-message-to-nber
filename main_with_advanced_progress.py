@@ -22,6 +22,7 @@ from api.bulk_sender import BulkSender
 from utils.validators import PhoneValidator, DataValidator
 from utils.logger import logger
 from utils.exceptions import *
+from utils.anti_spam_manager import AntiSpamManager
 from ui.components import (
     StatusIndicator, ProgressFrame, CollapsibleSection, 
     ValidatedEntry, DataTable, MessageComposer
@@ -29,6 +30,7 @@ from ui.components import (
 from ui.bulk_send_dialog import BulkSendDialog
 from ui.progress_widgets import DetailedProgressDialog, SimpleProgressOverlay
 from ui.sent_numbers_dialog import SentNumbersDialog
+from ui.anti_spam_config_widget import UserCustomizableAntiSpamWidget
 
 # Configuration globale
 ctk.set_appearance_mode("dark")
@@ -54,6 +56,10 @@ class ExcelWhatsAppApp:
         self.bulk_sender: Optional[BulkSender] = None
         self.column_vars: Dict[str, tk.BooleanVar] = {}
         self.is_sending = False
+        
+        # Système anti-spam
+        self.anti_spam_manager = AntiSpamManager()
+        self.anti_spam_widget: Optional[UserCustomizableAntiSpamWidget] = None
         
         # Variables UI
         self.selected_file = ctk.StringVar()
@@ -331,7 +337,18 @@ class ExcelWhatsAppApp:
             font=ctk.CTkFont(size=10, weight="bold"),
             fg_color=("#4B0082", "#6A0DAD")
         )
-        config_btn.pack(side='left', padx=(0, 5))
+        config_btn.pack(side='left', padx=(0, 3))
+        
+        antispam_btn = ctk.CTkButton(
+            action_buttons, 
+            text="🛡️ Anti-Spam", 
+            command=self.show_anti_spam_config,
+            height=35, 
+            width=90,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            fg_color=("#DC143C", "#B22222")
+        )
+        antispam_btn.pack(side='left', padx=(0, 5))
         
         self.send_btn = ctk.CTkButton(
             action_buttons, 
@@ -739,54 +756,94 @@ class ExcelWhatsAppApp:
             total_phones = 0
             valid_phones = 0
             invalid_phones = []
+            processing_errors = []
             
             for idx, row in self.df.iterrows():
-                phone_raw = str(row[phone_column]).strip()
+                # Utiliser la nouvelle méthode de nettoyage
+                original_value = row[phone_column]
+                phone_cleaned = self._extract_clean_phone_number(original_value)
                 
-                if not phone_raw or phone_raw.lower() in ['nan', 'none', '']:
-                    continue
-                
-                total_phones += 1
-                
-                if PhoneValidator.is_valid_phone(phone_raw):
-                    valid_phones += 1
-                else:
-                    invalid_phones.append({
-                        'ligne': idx + 2,  # +2 car Excel commence à 1 et il y a l'en-tête
-                        'numero': phone_raw
-                    })
+                # Compter seulement les cellules non vides dans Excel
+                if pd.notna(original_value) and str(original_value).strip():
+                    total_phones += 1
+                    
+                    if not phone_cleaned:
+                        # Le numéro n'a pas pu être nettoyé (format invalide)
+                        suggestion = self._get_phone_format_suggestions(original_value)
+                        processing_errors.append({
+                            'ligne': idx + 2,
+                            'original': str(original_value),
+                            'erreur': suggestion
+                        })
+                        continue
+                    
+                    if PhoneValidator.is_valid_phone(phone_cleaned):
+                        valid_phones += 1
+                    else:
+                        invalid_phones.append({
+                            'ligne': idx + 2,
+                            'original': str(original_value),
+                            'numero_nettoye': phone_cleaned
+                        })
             
             invalid_count = len(invalid_phones)
+            error_count = len(processing_errors)
+            total_problematic = invalid_count + error_count
             valid_percentage = (valid_phones / total_phones * 100) if total_phones > 0 else 0
             
             # Préparer le rapport
             report_msg = f"📊 Rapport de validation des numéros\\n\\n"
             report_msg += f"📱 Total analysé: {total_phones} numéros\\n"
             report_msg += f"✅ Valides: {valid_phones} ({valid_percentage:.1f}%)\\n"
-            report_msg += f"❌ Invalides: {invalid_count}\\n\\n"
             
+            if error_count > 0:
+                report_msg += f"⚠️ Erreurs de format: {error_count}\\n"
             if invalid_count > 0:
-                report_msg += f"🔍 Premiers numéros invalides:\\n"
-                for i, invalid in enumerate(invalid_phones[:5]):  # Montrer les 5 premiers
-                    report_msg += f"  • Ligne {invalid['ligne']}: {invalid['numero']}\\n"
+                report_msg += f"❌ Invalides: {invalid_count}\\n"
+            
+            report_msg += f"\\n"
+            
+            # Détails des erreurs de format
+            if error_count > 0:
+                report_msg += f"🔧 Erreurs de format (premiers 3):\\n"
+                for i, error in enumerate(processing_errors[:3]):
+                    original_short = error['original'][:20] + "..." if len(error['original']) > 20 else error['original']
+                    report_msg += f"  • Ligne {error['ligne']}: {original_short} ({error['erreur']})\\n"
                 
-                if invalid_count > 5:
-                    report_msg += f"  ... et {invalid_count - 5} autres\\n"
+                if error_count > 3:
+                    report_msg += f"  ... et {error_count - 3} autres\\n"
+                report_msg += f"\\n"
+            
+            # Détails des numéros invalides
+            if invalid_count > 0:
+                report_msg += f"🔍 Numéros invalides (premiers 3):\\n"
+                for i, invalid in enumerate(invalid_phones[:3]):
+                    report_msg += f"  • Ligne {invalid['ligne']}: {invalid['numero_nettoye']} (depuis: {invalid['original'][:15]}...)\\n"
                 
-                report_msg += f"\\n💡 Ces numéros seront automatiquement ignorés lors de l'envoi."
+                if invalid_count > 3:
+                    report_msg += f"  ... et {invalid_count - 3} autres\\n"
+                report_msg += f"\\n"
+            
+            if total_problematic > 0:
+                report_msg += f"💡 Ces {total_problematic} numéros seront automatiquement ignorés lors de l'envoi.\\n\\n"
+                report_msg += f"🔧 Conseils pour corriger dans Excel:\\n"
+                report_msg += f"• Format → Cellules → Catégorie: 'Texte' (évite la notation scientifique)\\n"
+                report_msg += f"• Supprimer les virgules dans les numéros (650,153,059 → 650153059)\\n"
+                report_msg += f"• Utiliser le format international: +237XXXXXXXXX"
             
             # Afficher le rapport
-            if invalid_count == 0:
+            if total_problematic == 0:
                 messagebox.showinfo("✅ Validation réussie", report_msg)
                 self.status_indicator.set_status('success', f'Tous les numéros sont valides')
             else:
                 messagebox.showwarning("⚠️ Numéros invalides détectés", report_msg)
-                self.status_indicator.set_status('warning', f'{invalid_count} numéros invalides')
+                self.status_indicator.set_status('warning', f'{total_problematic} numéros problématiques')
             
             logger.info("phone_validation_completed", 
                        total=total_phones, 
                        valid=valid_phones, 
                        invalid=invalid_count,
+                       format_errors=error_count,
                        valid_percentage=valid_percentage)
                        
         except Exception as e:
@@ -829,11 +886,10 @@ class ExcelWhatsAppApp:
             
             test_phone = None
             for _, row in self.df.iterrows():
-                phone_raw = str(row[phone_column_name]).strip()
-                if phone_raw and phone_raw.lower() not in ['nan', 'none', '']:
-                    if PhoneValidator.is_valid_phone(phone_raw):
-                        test_phone = phone_raw
-                        break
+                phone_raw = self._extract_clean_phone_number(row[phone_column_name])
+                if phone_raw and PhoneValidator.is_valid_phone(phone_raw):
+                    test_phone = phone_raw
+                    break
             
             if not test_phone:
                 self.api_status.set_status('error', 'Aucun numéro valide')
@@ -1141,6 +1197,124 @@ class ExcelWhatsAppApp:
         
         return errors
     
+    def _extract_clean_phone_number(self, phone_value) -> str:
+        """Extrait et nettoie un numéro de téléphone depuis Excel avec gestion avancée"""
+        if pd.isna(phone_value) or phone_value is None:
+            return ""
+        
+        # Convertir en string et nettoyer les espaces
+        phone_str = str(phone_value).strip()
+        
+        # Vérifier si c'est vide ou des valeurs nulles
+        if not phone_str or phone_str.lower() in ['nan', 'none', 'null', '']:
+            return ""
+        
+        # Supprimer les séparateurs de milliers d'Excel (virgules, espaces)
+        # Exemples: "650,153,059" → "650153059", "650 153 059" → "650153059"
+        phone_str = phone_str.replace(',', '').replace(' ', '')
+        
+        # Gérer les formats Excel avec points décimaux (ex: "650153059.0")
+        if phone_str.endswith('.0'):
+            phone_str = phone_str[:-2]
+        
+        # Gérer les nombres en notation scientifique (ex: 6.55474776e+17)
+        if 'e+' in phone_str.lower() or 'e-' in phone_str.lower():
+            try:
+                # Convertir en float puis en int pour éviter la notation scientifique
+                float_val = float(phone_str)
+                if float_val.is_integer() and float_val > 0:
+                    phone_str = str(int(float_val))
+                else:
+                    return ""  # Nombre non valide
+            except (ValueError, OverflowError):
+                return ""
+        
+        # Gérer les formats avec tirets ou autres séparateurs
+        # Ex: "650-153-059", "650.153.059", "650 153 059"
+        import re
+        if phone_str.startswith('+'):
+            # Conserver le + international et nettoyer le reste
+            prefix = '+'
+            number_part = phone_str[1:]
+            # Supprimer tous les caractères non numériques
+            cleaned_number = re.sub(r'[^\d]', '', number_part)
+            cleaned = prefix + cleaned_number
+        else:
+            # Supprimer tous les caractères non numériques
+            cleaned = re.sub(r'[^\d]', '', phone_str)
+        
+        # Vérifier la longueur (numéros de téléphone valides : 8 à 15 chiffres)
+        if cleaned.startswith('+'):
+            digits_only = cleaned[1:]
+        else:
+            digits_only = cleaned
+        
+        if len(digits_only) < 8 or len(digits_only) > 15:
+            return ""  # Longueur invalide
+        
+        # Éviter les numéros qui sont clairement des erreurs
+        if digits_only == '0' * len(digits_only):
+            return ""  # Que des zéros
+        
+        # Éviter les numéros avec trop de chiffres répétés (probablement une erreur)
+        if len(set(digits_only)) == 1:  # Tous les chiffres identiques
+            return ""
+        
+        # Gestion intelligente des préfixes pays
+        if not cleaned.startswith('+'):
+            if len(digits_only) == 9 and digits_only.startswith('6'):
+                # Numéro camerounais mobile probable (6xxxxxxxx)
+                cleaned = '+237' + digits_only
+            elif len(digits_only) == 10 and digits_only.startswith('65'):
+                # Numéro camerounais avec 0 initial omis (65xxxxxxx)
+                cleaned = '+237' + digits_only
+            elif len(digits_only) == 12 and digits_only.startswith('237'):
+                # Numéro avec préfixe 237 mais sans +
+                cleaned = '+' + digits_only
+        
+        return cleaned
+    
+    def _get_phone_format_suggestions(self, original_value: str, cleaned_value: str = "") -> str:
+        """Fournit des suggestions pour corriger les formats de numéros"""
+        if not original_value or str(original_value).strip() in ['nan', 'none', 'null', '']:
+            return "Cellule vide"
+        
+        original_str = str(original_value).strip()
+        
+        # Détecter le problème spécifique
+        if ',' in original_str:
+            return f"Séparateurs de milliers détectés. Utilisez: {original_str.replace(',', '')}"
+        elif ' ' in original_str and len(original_str.replace(' ', '')) > 8:
+            return f"Espaces détectés. Utilisez: {original_str.replace(' ', '')}"
+        elif 'e+' in original_str.lower() or 'e-' in original_str.lower():
+            return "Notation scientifique - reformatez la cellule Excel en 'Texte'"
+        elif len(original_str) > 15:
+            return "Trop long pour un numéro de téléphone"
+        elif cleaned_value and len(set(cleaned_value.replace('+', ''))) == 1:
+            return "Tous les chiffres sont identiques"
+        else:
+            return "Format non reconnu"
+    
+    def _format_delay_text(self, seconds: float) -> str:
+        """Formate le délai en texte lisible"""
+        seconds = int(seconds)
+        if seconds < 60:
+            return f"{seconds} secondes"
+        elif seconds < 3600:
+            minutes = seconds // 60
+            remaining_seconds = seconds % 60
+            if remaining_seconds == 0:
+                return f"{minutes} minutes"
+            else:
+                return f"{minutes}min {remaining_seconds}s"
+        else:
+            hours = seconds // 3600
+            remaining_minutes = (seconds % 3600) // 60
+            if remaining_minutes == 0:
+                return f"{hours} heures"
+            else:
+                return f"{hours}h {remaining_minutes}min"
+    
     def _prepare_messages_data(self) -> List[tuple]:
         """Prépare les données pour l'envoi en masse"""
         messages = []
@@ -1152,14 +1326,19 @@ class ExcelWhatsAppApp:
         if self.include_excel_data.get():
             selected_columns = [col for col, var in self.column_vars.items() if var.get()]
         
+        skipped_empty = 0
+        skipped_invalid = 0
+        
         for idx, row in self.df.iterrows():
-            phone_raw = str(row[phone_column]).strip()
+            # Meilleure extraction du numéro depuis Excel
+            phone_raw = self._extract_clean_phone_number(row[phone_column])
             
-            if not phone_raw or phone_raw.lower() in ['nan', 'none', '']:
+            if not phone_raw:
+                skipped_empty += 1
                 continue
             
             if not PhoneValidator.is_valid_phone(phone_raw):
-                logger.warning("invalid_phone_skipped", phone=phone_raw, row=idx)
+                skipped_invalid += 1
                 continue
             
             message = user_message
@@ -1182,6 +1361,14 @@ class ExcelWhatsAppApp:
                     message += "\n\n📋 Données:\n" + "\n".join(data_lines)
             
             messages.append((phone_raw, message, image_path))
+        
+        # Log de résumé pour éviter le spam dans les logs
+        if skipped_empty > 0 or skipped_invalid > 0:
+            logger.info("phone_processing_summary", 
+                       total_processed=len(self.df),
+                       messages_created=len(messages),
+                       skipped_empty=skipped_empty,
+                       skipped_invalid=skipped_invalid)
         
         return messages
     
@@ -1346,48 +1533,176 @@ class ExcelWhatsAppApp:
             
             # Configuration actuelle
             current_frame = ctk.CTkFrame(main_frame, corner_radius=10)
-            current_frame.pack(fill='x', padx=20, pady=20)
+            current_frame.pack(fill='x', padx=20, pady=(20, 10))
             
             ctk.CTkLabel(
                 current_frame,
-                text="📊 Configuration Actuelle",
+                text="📊 Configuration des Délais d'Envoi",
                 font=ctk.CTkFont(size=14, weight="bold")
             ).pack(pady=(10, 5))
             
-            config_text = f"""
-🚀 Messages par série: {self.bulk_sender.message_burst_limit}
-⏰ Pause entre séries: {self.bulk_sender.burst_pause_duration//60} minutes
-🕒 Délai entre messages: {self.bulk_sender.message_delay} secondes
-📊 Limite quotidienne: {'Aucune' if not self.bulk_sender.max_daily_limit else self.bulk_sender.max_daily_limit}
-📱 Numéros déjà contactés: {self.bulk_sender.get_sent_numbers_count()}
-            """
+            # Variables pour les paramètres
+            import tkinter as tk
+            delay_var = tk.DoubleVar(value=self.bulk_sender.message_delay)
+            burst_var = tk.IntVar(value=self.bulk_sender.message_burst_limit)
+            pause_var = tk.IntVar(value=self.bulk_sender.burst_pause_duration)
+            
+            # Délai entre messages
+            delay_frame = ctk.CTkFrame(current_frame, fg_color="transparent")
+            delay_frame.pack(fill='x', padx=10, pady=5)
+            
+            ctk.CTkLabel(delay_frame, text="⏱️ Délai entre messages:", font=ctk.CTkFont(size=12)).pack(anchor='w')
+            delay_slider = ctk.CTkSlider(delay_frame, from_=1, to=3600, variable=delay_var, number_of_steps=60)
+            delay_slider.pack(fill='x', pady=2)
+            delay_label = ctk.CTkLabel(delay_frame, text=self._format_delay_text(delay_var.get()), font=ctk.CTkFont(size=10))
+            delay_label.pack(anchor='w')
+            def on_delay_change(v):
+                delay_label.configure(text=self._format_delay_text(float(v)))
+                # Sauvegarde automatique avec un léger délai pour éviter le spam
+                self.root.after(500, auto_save_config)
+            
+            delay_slider.configure(command=on_delay_change)
+            
+            # Messages par série
+            burst_frame = ctk.CTkFrame(current_frame, fg_color="transparent")
+            burst_frame.pack(fill='x', padx=10, pady=5)
+            
+            ctk.CTkLabel(burst_frame, text="🚀 Messages par série:", font=ctk.CTkFont(size=12)).pack(anchor='w')
+            burst_slider = ctk.CTkSlider(burst_frame, from_=5, to=50, variable=burst_var, number_of_steps=45)
+            burst_slider.pack(fill='x', pady=2)
+            burst_label = ctk.CTkLabel(burst_frame, text=f"{burst_var.get()} messages", font=ctk.CTkFont(size=10))
+            burst_label.pack(anchor='w')
+            def on_burst_change(v):
+                burst_label.configure(text=f"{int(float(v))} messages")
+                self.root.after(500, auto_save_config)
+            
+            burst_slider.configure(command=on_burst_change)
+            
+            # Pause entre séries
+            pause_frame = ctk.CTkFrame(current_frame, fg_color="transparent")
+            pause_frame.pack(fill='x', padx=10, pady=5)
+            
+            ctk.CTkLabel(pause_frame, text="⏸️ Pause entre séries:", font=ctk.CTkFont(size=12)).pack(anchor='w')
+            pause_slider = ctk.CTkSlider(pause_frame, from_=10, to=300, variable=pause_var, number_of_steps=58)
+            pause_slider.pack(fill='x', pady=2)
+            pause_label = ctk.CTkLabel(pause_frame, text=f"{pause_var.get()} secondes", font=ctk.CTkFont(size=10))
+            pause_label.pack(anchor='w')
+            def on_pause_change(v):
+                pause_label.configure(text=f"{int(float(v))} secondes")
+                self.root.after(500, auto_save_config)
+            
+            pause_slider.configure(command=on_pause_change)
+            
+            # Info frame
+            info_frame = ctk.CTkFrame(main_frame, corner_radius=10, fg_color=("#1E90FF", "#4682B4"))
+            info_frame.pack(fill='x', padx=20, pady=10)
             
             ctk.CTkLabel(
-                current_frame,
-                text=config_text.strip(),
-                font=ctk.CTkFont(size=12),
-                justify='left'
-            ).pack(pady=(0, 10))
+                info_frame,
+                text="💡 Exemples: 2s = Rapide | 30s = Modéré | 300s = 5min | 3600s = 1 heure | Max: 1 heure",
+                font=ctk.CTkFont(size=11),
+                text_color="white",
+                wraplength=400
+            ).pack(pady=8)
             
-            # Status
-            status_frame = ctk.CTkFrame(main_frame, corner_radius=10, fg_color=("#2E8B57", "#228B22"))
-            status_frame.pack(fill='x', padx=20, pady=(0, 10))
+            # Boutons d'action
+            buttons_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+            buttons_frame.pack(fill='x', padx=20, pady=10)
             
-            ctk.CTkLabel(
-                status_frame,
-                text="✅ Configuration Optimisée Anti-Blocage",
-                font=ctk.CTkFont(size=12, weight="bold"),
-                text_color="white"
-            ).pack(pady=10)
+            def auto_save_config():
+                """Sauvegarde automatique des paramètres dès modification"""
+                try:
+                    self.bulk_sender.configure_sending_parameters(
+                        message_delay=delay_var.get(),
+                        burst_limit=int(burst_var.get()),
+                        burst_pause=int(pause_var.get())
+                    )
+                    # Sauvegarde silencieuse - pas de popup
+                except Exception as e:
+                    print(f"Erreur sauvegarde auto: {e}")
             
-            # Bouton fermer
+            def apply_config():
+                # Appliquer et confirmer
+                auto_save_config()
+                messagebox.showinfo("✅ Configuration appliquée", 
+                                  f"Paramètres actifs:\\n"
+                                  f"• Délai: {self._format_delay_text(delay_var.get())}\\n"
+                                  f"• Série: {burst_var.get()} messages\\n"
+                                  f"• Pause: {pause_var.get()}s entre séries")
+            
+            def reset_to_fast():
+                # Configuration avec 5 minutes entre messages (nouvelle configuration par défaut)
+                delay_var.set(300.0)
+                burst_var.set(1)
+                pause_var.set(10)
+                # Mise à jour des labels
+                delay_label.configure(text=self._format_delay_text(300.0))
+                burst_label.configure(text="1 message")
+                pause_label.configure(text="10 secondes")
+                # Sauvegarde automatique
+                auto_save_config()
+            
+            def reset_to_5min_pause():
+                # Configuration avec pause de 5 minutes après chaque message
+                delay_var.set(300.0)  # 5 minutes
+                burst_var.set(1)      # 1 message par série
+                pause_var.set(10)     # Pause courte entre séries (peu utilisée)
+                # Mise à jour des labels
+                delay_label.configure(text=self._format_delay_text(300.0))
+                burst_label.configure(text="1 message")
+                pause_label.configure(text="10 secondes")
+                # Sauvegarde automatique
+                auto_save_config()
+            
+            def reset_to_moderate():
+                # Configuration modérée avec pauses raisonnables
+                delay_var.set(30.0)
+                burst_var.set(10)
+                pause_var.set(60)
+                # Mise à jour des labels
+                delay_label.configure(text=self._format_delay_text(30.0))
+                burst_label.configure(text="10 messages")
+                pause_label.configure(text="60 secondes")
+                # Sauvegarde automatique
+                auto_save_config()
+            
             ctk.CTkButton(
-                main_frame,
+                buttons_frame,
+                text="🛡️ Sécurisé",
+                command=reset_to_fast,
+                height=35,
+                width=80,
+                fg_color=("#32CD32", "#228B22")
+            ).pack(side='left', padx=(0, 3))
+            
+            ctk.CTkButton(
+                buttons_frame,
+                text="🕐 Modéré",
+                command=reset_to_moderate,
+                height=35,
+                width=70,
+                fg_color=("#FFA500", "#FF8C00")
+            ).pack(side='left', padx=3)
+            
+            ctk.CTkButton(
+                buttons_frame,
+                text="⏳ 5min",
+                command=reset_to_5min_pause,
+                height=35,
+                width=60,
+                fg_color=("#9370DB", "#8A2BE2")
+            ).pack(side='left', padx=3)
+            
+            # Espace entre les boutons et le bouton fermer
+            ctk.CTkFrame(buttons_frame, width=20, fg_color="transparent").pack(side='left')
+            
+            ctk.CTkButton(
+                buttons_frame,
                 text="❌ Fermer",
                 command=dialog.destroy,
                 height=35,
-                width=100
-            ).pack(pady=20)
+                width=80
+            ).pack(side='right')
             
             dialog.focus()
             
@@ -1395,6 +1710,111 @@ class ExcelWhatsAppApp:
             error_msg = f"Erreur lors de l'ouverture de la configuration: {str(e)}"
             logger.error("config_dialog_error", error=str(e))
             messagebox.showerror("❌ Erreur", error_msg)
+    
+    def show_anti_spam_config(self):
+        """Affiche la fenêtre de configuration anti-spam"""
+        try:
+            # Créer la fenêtre de configuration anti-spam
+            antispam_window = ctk.CTkToplevel(self.root)
+            antispam_window.title("🛡️ Configuration Anti-Spam Avancée")
+            antispam_window.geometry("900x700")
+            antispam_window.resizable(True, True)
+            antispam_window.transient(self.root)
+            antispam_window.grab_set()
+            
+            # Centrer la fenêtre
+            x = (antispam_window.winfo_screenwidth() // 2) - 450
+            y = (antispam_window.winfo_screenheight() // 2) - 350
+            antispam_window.geometry(f"900x700+{x}+{y}")
+            
+            # Créer le widget anti-spam
+            self.anti_spam_widget = UserCustomizableAntiSpamWidget(
+                antispam_window, 
+                self.anti_spam_manager
+            )
+            self.anti_spam_widget.pack(fill='both', expand=True, padx=20, pady=20)
+            
+            # Callbacks pour le widget
+            def on_config_change():
+                """Callback appelé quand la configuration change"""
+                logger.info("anti_spam_config_changed")
+                # Optionnel: mettre à jour d'autres composants
+            
+            def on_test_config(can_send, reason, delay):
+                """Callback appelé lors du test de configuration"""
+                logger.info("anti_spam_config_tested", 
+                           can_send=can_send, reason=reason, delay=delay)
+            
+            self.anti_spam_widget.on_config_change = on_config_change
+            self.anti_spam_widget.on_test_config = on_test_config
+            
+            antispam_window.focus()
+            
+        except Exception as e:
+            error_msg = f"Erreur lors de l'ouverture de la configuration anti-spam: {str(e)}"
+            logger.error("anti_spam_config_dialog_error", error=str(e))
+            messagebox.showerror("❌ Erreur", error_msg)
+    
+    def wait_with_antispam_protection(self, phone_number: str = "", update_callback=None):
+        """
+        Méthode d'attente avec protection anti-spam intelligent
+        Intègre la logique anti-spam dans le processus d'envoi
+        """
+        try:
+            can_send, reason, delay = self.anti_spam_manager.can_send_message(phone_number)
+            
+            if not can_send:
+                # Envoi bloqué - attendre le délai recommandé
+                self._countdown_wait(delay, f"⏸️ Attente anti-spam: {reason}", update_callback)
+                return False
+            
+            if delay > 0:
+                # Envoi autorisé avec délai - appliquer le délai intelligent
+                delay_text = self._format_delay_text(delay)
+                self._countdown_wait(delay, f"🕐 Délai anti-spam: {delay_text}", update_callback)
+            
+            # Enregistrer l'envoi pour les statistiques
+            self.anti_spam_manager.record_message_sent(phone_number)
+            
+            return True
+            
+        except Exception as e:
+            logger.error("anti_spam_wait_error", error=str(e))
+            if update_callback:
+                update_callback(f"❌ Erreur anti-spam: {str(e)}")
+            return True  # Continuer en cas d'erreur pour ne pas bloquer complètement
+    
+    def _countdown_wait(self, seconds: int, status_message: str, update_callback=None):
+        """
+        Compte à rebours visuel pour l'attente anti-spam
+        """
+        if update_callback:
+            for remaining in range(seconds, 0, -1):
+                if not self.is_sending:  # Arrêter si l'envoi est annulé
+                    break
+                
+                time_text = self._format_delay_text(remaining)
+                update_callback(f"{status_message} - Reste: {time_text}")
+                time.sleep(1)
+            
+            # Indiquer que l'attente est terminée
+            update_callback(f"{status_message} - Terminé ✅")
+        else:
+            # Attente simple sans callback
+            time.sleep(seconds)
+    
+    def get_anti_spam_recommendations(self, file_path: str = "", total_messages: int = 0) -> dict:
+        """
+        Obtient les recommandations anti-spam pour un envoi donné
+        """
+        try:
+            return self.anti_spam_manager.get_recommendations(file_path, total_messages)
+        except Exception as e:
+            logger.error("anti_spam_recommendations_error", error=str(e))
+            return {
+                'error': str(e),
+                'suggestions': ['❌ Erreur lors de l\'analyse anti-spam']
+            }
     
     def on_closing(self):
         """Gestionnaire de fermeture de l'application"""
