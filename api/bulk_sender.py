@@ -219,20 +219,32 @@ class BulkSender:
                     batch_results.append(result)
                     logger.error("task_submission_error", phone=phone, error=str(e))
             
-            # Collecter les résultats
-            for future in as_completed(future_to_data, timeout=300):  # 5 min timeout par batch
+            # Collecter les résultats - timeout ajusté pour les nouveaux délais
+            # Avec 90s entre messages + 5 messages par batch = ~450s minimum
+            timeout_per_batch = (self.message_delay * self.batch_size) + 120  # Marge de sécurité
+            for future in as_completed(future_to_data, timeout=timeout_per_batch):
                 if self.is_cancelled:
                     future.cancel()
                     continue
                 
                 try:
-                    result = future.result(timeout=60)  # 1 min timeout par message
+                    # Timeout per message ajusté selon le délai configuré
+                    individual_timeout = self.message_delay + 30  # Délai + marge
+                    result = future.result(timeout=individual_timeout)
                     batch_results.append(result)
                     
                     # Si le message a été envoyé avec succès, ajouter le numéro à la liste
                     if result.success:
-                        self.sent_numbers.add(result.phone)
+                        # Normaliser le numéro avant de l'ajouter
+                        normalized_phone = self._normalize_phone(result.phone)
+                        self.sent_numbers.add(normalized_phone)
                         messages_sent_in_burst += 1
+                        
+                        # Log pour debug
+                        logger.info("phone_added_to_sent", original=result.phone, normalized=normalized_phone)
+                        
+                        # Sauvegarder immédiatement après chaque succès pour éviter les pertes
+                        self._save_sent_numbers()
                         
                         # Délai entre chaque message pour éviter le blocage
                         time.sleep(self.message_delay)
@@ -250,9 +262,14 @@ class BulkSender:
                 except Exception as e:
                     phone_data = future_to_data.get(future, ("unknown", "", None))
                     phone = phone_data[0]
-                    result = MessageResult(phone, False, f"Timeout/Error: {str(e)}")
+                    error_msg = f"Timeout/Error: {str(e)}"
+                    result = MessageResult(phone, False, error_msg)
                     batch_results.append(result)
                     logger.error("message_processing_error", phone=phone, error=str(e))
+                    
+                    # Annuler le future si c'est un timeout
+                    if not future.done():
+                        future.cancel()
         
         logger.info("batch_completed", batch_num=batch_num, 
                    results_count=len(batch_results),
@@ -260,6 +277,15 @@ class BulkSender:
         
         # Sauvegarder les numéros contactés après chaque batch
         self._save_sent_numbers()
+        
+        # S'assurer que tous les futures sont terminés avant de continuer
+        for future in future_to_data:
+            if not future.done():
+                try:
+                    future.cancel()
+                    logger.warning("future_cancelled_cleanup", batch=batch_num)
+                except Exception:
+                    pass  # Ignorer les erreurs d'annulation
         
         return batch_results
     
