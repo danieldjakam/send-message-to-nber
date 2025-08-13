@@ -39,9 +39,9 @@ class SendingSession:
 class BulkSender:
     """Gestionnaire d'envoi en masse optimisé pour de gros volumes"""
     
-    def __init__(self, whatsapp_client: WhatsAppClient, batch_size: int = 4):
+    def __init__(self, whatsapp_client: WhatsAppClient, batch_size: int = 20):
         self.client = whatsapp_client
-        self.batch_size = batch_size  # 4 messages par batch pour 100 msg/jour
+        self.batch_size = batch_size  # Batch plus grand car pause basée sur comptage individuel
         self.sessions_dir = Path.home() / ".excel_whatsapp" / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         
@@ -51,11 +51,12 @@ class BulkSender:
         self.retry_attempts = 2
         self.memory_cleanup_interval = 100  # Nettoyer la mémoire tous les 100 messages
         
-        # Configuration pour 100 messages/jour
+        # Configuration pour 100 messages/jour avec pause après 7 messages
         self.max_daily_limit = 100  # 100 messages/jour
-        self.message_burst_limit = 4  # 4 messages avant pause
-        self.burst_pause_duration = 480  # 8 minutes entre chaque série
+        self.message_burst_limit = 7  # 7 messages avant pause de 9 minutes
+        self.burst_pause_duration = 540  # 9 minutes entre chaque série de 7
         self.message_delay = 12.0  # 12 secondes entre chaque message
+        self.sent_in_current_burst = 0  # Compteur pour la série actuelle
         
         # Pauses aléatoires pour comportement humain
         self.use_random_delays = True
@@ -166,12 +167,7 @@ class BulkSender:
                 if batch_num % 10 == 0:
                     gc.collect()
                 
-                # PAUSE ALÉATOIRE entre les batches (8-15 minutes)
-                if batch_num < len(batches) - 1:
-                    delay = self._get_random_batch_delay()
-                    minutes = delay / 60
-                    self._update_status(f"🛑 Pause de {minutes:.1f} minutes avant le prochain batch de {self.batch_size} messages...")
-                    time.sleep(delay)
+                # Plus de pause entre batches - la pause se fait maintenant après 7 messages
             
             # Finaliser la session
             session.cancelled = self.is_cancelled
@@ -227,6 +223,14 @@ class BulkSender:
             while self.is_paused and not self.is_cancelled:
                 time.sleep(0.1)
             
+            # Vérifier si on a atteint la limite de 7 messages et faire une pause de 9 minutes
+            if self.sent_in_current_burst >= self.message_burst_limit:
+                pause_minutes = self.burst_pause_duration / 60
+                self._update_status(f"🛑 Pause de {pause_minutes:.0f} minutes après {self.message_burst_limit} messages envoyés...")
+                time.sleep(self.burst_pause_duration)
+                self.sent_in_current_burst = 0  # Remettre le compteur à zéro
+                self._update_status("✅ Reprise de l'envoi après la pause...")
+            
             try:
                 # Envoyer le message
                 if image_path:
@@ -242,8 +246,12 @@ class BulkSender:
                     normalized_phone = self._normalize_phone(result.phone)
                     self.sent_numbers.add(normalized_phone)
                     
+                    # Incrémenter le compteur de messages envoyés dans la série actuelle
+                    self.sent_in_current_burst += 1
+                    
                     # Log pour debug
-                    logger.info("phone_added_to_sent", original=result.phone, normalized=normalized_phone)
+                    logger.info("phone_added_to_sent", original=result.phone, normalized=normalized_phone, 
+                               burst_count=self.sent_in_current_burst)
                     
                     # Sauvegarder immédiatement après chaque succès
                     self._save_sent_numbers()
@@ -252,11 +260,10 @@ class BulkSender:
                 total_completed = self.current_session.completed + len(batch_results)
                 self._update_progress(total_completed, self.current_session.total_messages)
                 
-                # DÉLAI ALÉATOIRE entre chaque message (sauf le dernier du batch)
-                if i < len(batch) - 1:  # Pas de délai après le dernier message du batch
-                    delay = self._get_random_message_delay()
-                    self._update_status(f"⏱️ Attente {delay:.1f}s avant le prochain message (délai aléatoire)...")
-                    time.sleep(delay)
+                # DÉLAI ALÉATOIRE entre chaque message
+                delay = self._get_random_message_delay()
+                self._update_status(f"⏱️ Attente {delay:.1f}s avant le prochain message ({self.sent_in_current_burst}/{self.message_burst_limit})...")
+                time.sleep(delay)
                 
             except Exception as e:
                 error_msg = f"Erreur lors de l'envoi: {str(e)}"
@@ -266,7 +273,8 @@ class BulkSender:
         
         logger.info("batch_completed", batch_num=batch_num, 
                    results_count=len(batch_results),
-                   successful=sum(1 for r in batch_results if r.success))
+                   successful=sum(1 for r in batch_results if r.success),
+                   current_burst=self.sent_in_current_burst)
         
         # Sauvegarder les numéros contactés après chaque batch
         self._save_sent_numbers()
