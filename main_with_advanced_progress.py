@@ -88,8 +88,17 @@ class ExcelWhatsAppApp:
         # Configuration du thème
         self.root.configure(fg_color=("#f0f0f0", "#212121"))
         
+        # Créer un frame principal scrollable pour toute l'interface
+        self.main_scrollable_frame = ctk.CTkScrollableFrame(
+            self.root,
+            fg_color="transparent",
+            scrollbar_button_color=("#CCCCCC", "#333333"),
+            scrollbar_button_hover_color=("#AAAAAA", "#555555")
+        )
+        self.main_scrollable_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
         # Titre principal avec version
-        title_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        title_frame = ctk.CTkFrame(self.main_scrollable_frame, fg_color="transparent")
         title_frame.pack(pady=20)
         
         title_label = ctk.CTkLabel(
@@ -109,7 +118,7 @@ class ExcelWhatsAppApp:
         
         # Status global avec animation
         self.status_indicator = StatusIndicator(
-            self.root,
+            self.main_scrollable_frame,
             font=ctk.CTkFont(size=12, weight="bold")
         )
         self.status_indicator.pack(pady=(0, 10))
@@ -121,7 +130,7 @@ class ExcelWhatsAppApp:
         self.api_section = self._create_api_section()
         
         # Barre de progression avancée intégrée
-        self.progress_frame = ProgressFrame(self.root)
+        self.progress_frame = ProgressFrame(self.main_scrollable_frame)
         
         # Overlay de progression simple pour petits volumes
         self.simple_overlay = SimpleProgressOverlay(self.root, corner_radius=10)
@@ -134,7 +143,7 @@ class ExcelWhatsAppApp:
     
     def _create_file_section(self) -> ctk.CTkFrame:
         """Crée la section de sélection de fichier"""
-        file_frame = ctk.CTkFrame(self.root, corner_radius=15)
+        file_frame = ctk.CTkFrame(self.main_scrollable_frame, corner_radius=15)
         file_frame.pack(pady=10, padx=30, fill='x')
         
         file_label = ctk.CTkLabel(
@@ -185,7 +194,7 @@ class ExcelWhatsAppApp:
     
     def _create_api_section(self) -> CollapsibleSection:
         """Crée la section de configuration API"""
-        api_section = CollapsibleSection(self.root, "📱 Configuration UltraMsg API")
+        api_section = CollapsibleSection(self.main_scrollable_frame, "📱 Configuration UltraMsg API")
         api_section.pack(fill='x', padx=30, pady=10)
         
         content = api_section.get_content_frame()
@@ -348,7 +357,7 @@ class ExcelWhatsAppApp:
     
     def _create_columns_section(self) -> ctk.CTkFrame:
         """Crée la section de sélection des colonnes"""
-        columns_frame = ctk.CTkFrame(self.root, corner_radius=15)
+        columns_frame = ctk.CTkFrame(self.main_scrollable_frame, corner_radius=15)
         columns_frame.pack(fill='x', padx=30, pady=10)
         
         # Titre
@@ -437,7 +446,7 @@ class ExcelWhatsAppApp:
     
     def _create_data_section(self) -> ctk.CTkFrame:
         """Crée la section d'affichage des données"""
-        data_frame = ctk.CTkFrame(self.root, corner_radius=15)
+        data_frame = ctk.CTkFrame(self.main_scrollable_frame, corner_radius=15)
         data_frame.pack(fill='both', expand=True, padx=30, pady=10)
         
         # Titre
