@@ -39,31 +39,31 @@ class SendingSession:
 class BulkSender:
     """Gestionnaire d'envoi en masse optimisé pour de gros volumes"""
     
-    def __init__(self, whatsapp_client: WhatsAppClient, batch_size: int = 20):
+    def __init__(self, whatsapp_client: WhatsAppClient, batch_size: int = 5):
         self.client = whatsapp_client
-        self.batch_size = batch_size  # Batch plus grand car pause basée sur comptage individuel
+        self.batch_size = batch_size  # Batch optimisé pour 50 messages/jour
         self.sessions_dir = Path.home() / ".excel_whatsapp" / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         
-        # Configuration pour 50 messages/jour
-        self.max_workers = 1  # 1 seul thread pour éviter la surcharge
-        self.batch_delay = 480.0  # 8 minutes entre batches
-        self.retry_attempts = 2
-        self.memory_cleanup_interval = 100  # Nettoyer la mémoire tous les 100 messages
+        # Configuration optimisée pour 50 messages/jour (nouveau numéro)
+        self.max_workers = 2  # 2 threads max pour efficacité sans surcharge
+        self.batch_delay = 300.0  # 5 minutes entre batches
+        self.retry_attempts = 3
+        self.memory_cleanup_interval = 50  # Nettoyer la mémoire tous les 50 messages
         
-        # Configuration pour 50 messages/jour avec pause après 7 messages
+        # Configuration pour 50 messages/jour répartis intelligemment
         self.max_daily_limit = 50  # 50 messages/jour
-        self.message_burst_limit = 7  # 7 messages avant pause de 9 minutes
-        self.burst_pause_duration = 540  # 9 minutes entre chaque série de 7
-        self.message_delay = 12.0  # 12 secondes entre chaque message
+        self.message_burst_limit = 5  # 5 messages par batch
+        self.burst_pause_duration = 300  # 5 minutes entre chaque batch de 5
+        self.message_delay = 8.0  # 8 secondes entre chaque message
         self.sent_in_current_burst = 0  # Compteur pour la série actuelle
         
-        # Pauses aléatoires pour comportement humain
+        # Pauses aléatoires pour comportement humain optimisées
         self.use_random_delays = True
-        self.min_message_delay = 12.0  # Minimum 12 secondes
-        self.max_message_delay = 25.0  # Maximum 25 secondes
-        self.min_batch_delay = 480.0   # Minimum 8 minutes
-        self.max_batch_delay = 900.0   # Maximum 15 minutes
+        self.min_message_delay = 6.0   # Minimum 6 secondes (plus rapide)
+        self.max_message_delay = 12.0  # Maximum 12 secondes  
+        self.min_batch_delay = 240.0   # Minimum 4 minutes
+        self.max_batch_delay = 360.0   # Maximum 6 minutes
         
         # État de l'envoi
         self.current_session: Optional[SendingSession] = None
