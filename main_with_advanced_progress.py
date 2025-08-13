@@ -405,6 +405,22 @@ class ExcelWhatsAppApp:
         )
         validate_btn.pack(side='right', padx=(0, 10))
         
+        # Checkbox pour masquer les numéros déjà contactés
+        filter_frame = ctk.CTkFrame(action_frame, fg_color="transparent")
+        filter_frame.pack(side='right', padx=(10, 10))
+        
+        self.hide_sent_var = tk.BooleanVar(value=True)  # Activé par défaut
+        hide_sent_checkbox = ctk.CTkCheckBox(
+            filter_frame,
+            text="🚫 Masquer les déjà contactés",
+            variable=self.hide_sent_var,
+            command=self._on_hide_sent_changed,
+            font=ctk.CTkFont(size=10),
+            checkbox_width=16,
+            checkbox_height=16
+        )
+        hide_sent_checkbox.pack(pady=5)
+        
         show_data_btn = ctk.CTkButton(
             action_frame, 
             text="👁️ Aperçu des données", 
@@ -798,9 +814,60 @@ class ExcelWhatsAppApp:
     def display_data(self, columns: List[str]):
         """Affiche les données sélectionnées dans un tableau moderne"""
         self.data_section.pack(fill='both', expand=True, padx=30, pady=10)
-        selected_data = self.df[columns]
-        self.data_table.load_data(selected_data, columns, max_rows=1000)
-        self.status_indicator.set_status('success', f'Aperçu: {len(columns)} colonnes')
+        
+        # Filtrer les numéros déjà envoyés si l'option est activée
+        if hasattr(self, 'hide_sent_var') and self.hide_sent_var.get():
+            filtered_data = self._filter_sent_numbers_from_display(columns)
+            total_before = len(self.df)
+            total_after = len(filtered_data)
+            removed_count = total_before - total_after
+            
+            self.data_table.load_data(filtered_data, columns, max_rows=1000)
+            self.status_indicator.set_status('success', f'Aperçu: {len(columns)} colonnes - {removed_count} déjà contactés masqués')
+        else:
+            selected_data = self.df[columns]
+            self.data_table.load_data(selected_data, columns, max_rows=1000)
+            self.status_indicator.set_status('success', f'Aperçu: {len(columns)} colonnes')
+    
+    def _filter_sent_numbers_from_display(self, columns: List[str]):
+        """Filtre les lignes contenant des numéros déjà envoyés pour l'affichage"""
+        if not hasattr(self, 'bulk_sender') or self.bulk_sender is None:
+            return self.df[columns]
+        
+        # Charger les numéros déjà envoyés
+        self.bulk_sender._load_sent_numbers()
+        sent_numbers = self.bulk_sender.sent_numbers
+        
+        if not sent_numbers:
+            return self.df[columns]
+        
+        # Trouver la colonne de téléphone (normalement CONTACTS 1)
+        phone_column = None
+        for col in columns:
+            if 'contact' in col.lower() or 'phone' in col.lower():
+                phone_column = col
+                break
+        
+        if phone_column is None:
+            # Si pas de colonne de téléphone trouvée, retourner toutes les données
+            return self.df[columns]
+        
+        # Filtrer les lignes où le numéro n'est PAS dans la liste des envoyés
+        filtered_mask = self.df[phone_column].apply(
+            lambda phone: self.bulk_sender._normalize_phone(str(phone)) not in sent_numbers
+        )
+        
+        filtered_df = self.df[filtered_mask]
+        return filtered_df[columns]
+    
+    def _on_hide_sent_changed(self):
+        """Appelé quand la checkbox 'masquer les déjà contactés' change"""
+        # Actualiser l'affichage si des données sont déjà visibles
+        if hasattr(self, 'data_table') and self.data_table.winfo_viewable():
+            # Réafficher les données avec le nouveau filtre
+            selected_columns = [col for col, var in self.column_vars.items() if var.get()]
+            if selected_columns:
+                self.display_data(selected_columns)
     
     def test_api_connection(self):
         """Teste la connexion API avec validation complète"""
@@ -1005,7 +1072,7 @@ class ExcelWhatsAppApp:
             session = self.bulk_sender.send_bulk_optimized(
                 messages_data,
                 progress_callback=progress_callback,
-                status_callback=lambda msg: self.root.after(0, lambda: self.progress_frame.progress_label.configure(text=msg))
+                status_callback=self._safe_status_callback
             )
             
             self.root.after(0, lambda: self._handle_simple_bulk_send_results(session))
@@ -1088,6 +1155,24 @@ class ExcelWhatsAppApp:
         self.status_indicator.set_status('error', 'Erreur d\'envoi')
         messagebox.showerror("❌ Erreur d'envoi", error_msg)
     
+    def _safe_status_callback(self, msg: str):
+        """Callback de statut sécurisé pour éviter les erreurs Tkinter"""
+        try:
+            if hasattr(self, 'progress_frame') and hasattr(self.progress_frame, 'progress_label'):
+                self.root.after(0, lambda: self._update_progress_label_safe(msg))
+        except Exception:
+            # Ignorer silencieusement les erreurs de widget détruit
+            pass
+    
+    def _update_progress_label_safe(self, msg: str):
+        """Met à jour le label de progression de manière sécurisée"""
+        try:
+            if hasattr(self.progress_frame, 'progress_label'):
+                self.progress_frame.progress_label.configure(text=msg)
+        except Exception:
+            # Ignorer silencieusement les erreurs de widget détruit
+            pass
+    
     def _show_simple_sending_report(self, stats: Dict):
         """Affiche le rapport d'envoi simple"""
         report_title = "📊 Rapport d'envoi"
@@ -1163,23 +1248,8 @@ class ExcelWhatsAppApp:
                 continue
             
             message = user_message
-            if selected_columns:
-                data_lines = []
-                for col in selected_columns:
-                    try:
-                        # Assurer que col est bien une chaîne
-                        col_name = str(col) if col is not None else "Unknown"
-                        value = str(row[col]) if pd.notna(row[col]) else "N/A"
-                        data_line = f"{col_name}: {value}"
-                        data_lines.append(data_line)
-                    except Exception as e:
-                        logger.warning("data_line_creation_error", col=col, error=str(e))
-                        continue
-                
-                if data_lines:
-                    # Vérifier que tous les éléments sont des chaînes
-                    data_lines = [str(line) for line in data_lines]
-                    message += "\n\n📋 Données:\n" + "\n".join(data_lines)
+            # Removed Excel data appending to prevent data block in messages
+            # The data is no longer automatically appended to each message
             
             messages.append((phone_raw, message, image_path))
         

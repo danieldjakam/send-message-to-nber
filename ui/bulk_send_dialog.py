@@ -245,8 +245,8 @@ class BulkSendDialog(ctk.CTkToplevel):
             if self.bulk_sender.max_workers < 1 or self.bulk_sender.max_workers > 10:
                 raise ValueError("Le nombre de threads doit être entre 1 et 10")
             
-            if self.bulk_sender.batch_delay < 0 or self.bulk_sender.batch_delay > 30:
-                raise ValueError("Le délai doit être entre 0 et 30 secondes")
+            if self.bulk_sender.batch_delay < 0 or self.bulk_sender.batch_delay > 1800:
+                raise ValueError("Le délai doit être entre 0 et 1800 secondes (30 minutes)")
                 
         except ValueError as e:
             raise ValueError(f"Configuration invalide: {str(e)}")
@@ -292,7 +292,7 @@ class BulkSendDialog(ctk.CTkToplevel):
             
             # Label principal
             percentage = progress * 100
-            self.progress_label.configure(text=f"{status} - {percentage:.1f}%")
+            self._safe_update_progress_label(f"{status} - {percentage:.1f}%")
             
             # Statistiques détaillées
             if self.current_session:
@@ -316,7 +316,21 @@ class BulkSendDialog(ctk.CTkToplevel):
     
     def update_status(self, message: str):
         """Met à jour le statut (appelé depuis le thread d'envoi)"""
-        self.after(0, lambda: self.progress_label.configure(text=message))
+        try:
+            if self.winfo_exists():
+                self.after(0, lambda: self._safe_update_progress_label(message))
+        except tk.TclError:
+            # Widget détruit, ignorer silencieusement
+            pass
+    
+    def _safe_update_progress_label(self, message: str):
+        """Met à jour le label de progression de manière sécurisée"""
+        try:
+            if hasattr(self, 'progress_label') and self.progress_label.winfo_exists():
+                self.progress_label.configure(text=message)
+        except tk.TclError:
+            # Widget détruit, ignorer silencieusement
+            pass
     
     def toggle_pause(self):
         """Bascule entre pause et reprise"""
@@ -370,10 +384,7 @@ class BulkSendDialog(ctk.CTkToplevel):
                 stats = self.bulk_sender.get_session_stats(self.current_session)
                 
                 if self.current_session.cancelled:
-                    try:
-                        self.progress_label.configure(text="🛑 Envoi annulé")
-                    except tk.TclError:
-                        return
+                    self._safe_update_progress_label("🛑 Envoi annulé")
                     messagebox.showwarning(
                         "Envoi annulé",
                         f"L'envoi a été annulé.\\n\\n"
@@ -382,10 +393,7 @@ class BulkSendDialog(ctk.CTkToplevel):
                         f"❌ Échecs: {stats.get('failed', 0)}"
                     )
                 else:
-                    try:
-                        self.progress_label.configure(text="✅ Envoi terminé avec succès!")
-                    except tk.TclError:
-                        return
+                    self._safe_update_progress_label("✅ Envoi terminé avec succès!")
                     
                     success_rate = stats.get('success_rate', 0)
                     if success_rate == 100:
@@ -421,7 +429,7 @@ class BulkSendDialog(ctk.CTkToplevel):
             self.start_btn.configure(state="normal")
             self.pause_btn.configure(state="disabled")
             self.stop_btn.configure(state="disabled")
-            self.progress_label.configure(text="❌ Erreur d'envoi")
+            self._safe_update_progress_label("❌ Erreur d'envoi")
         except tk.TclError:
             # La fenêtre a été fermée, pas de problème
             return
