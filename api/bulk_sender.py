@@ -39,30 +39,30 @@ class SendingSession:
 class BulkSender:
     """Gestionnaire d'envoi en masse optimisé pour de gros volumes"""
     
-    def __init__(self, whatsapp_client: WhatsAppClient, batch_size: int = 2):
+    def __init__(self, whatsapp_client: WhatsAppClient, batch_size: int = 4):
         self.client = whatsapp_client
-        self.batch_size = batch_size  # Phase 1: 2 messages par batch
+        self.batch_size = batch_size  # 4 messages par batch pour 100 msg/jour
         self.sessions_dir = Path.home() / ".excel_whatsapp" / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         
-        # Configuration PHASE 1 - RÉCUPÉRATION PROGRESSIVE (Semaine 1)
+        # Configuration pour 100 messages/jour
         self.max_workers = 1  # 1 seul thread pour éviter la surcharge
-        self.batch_delay = 900.0  # 15 minutes entre batches
+        self.batch_delay = 480.0  # 8 minutes entre batches
         self.retry_attempts = 2
         self.memory_cleanup_interval = 100  # Nettoyer la mémoire tous les 100 messages
         
-        # Configuration des limites et pauses - MONTÉE PROGRESSIVE
-        self.max_daily_limit = 20  # Phase 1: 20 messages/jour (récupération)
-        self.message_burst_limit = 2  # 2 messages avant pause
-        self.burst_pause_duration = 600  # 10 minutes entre chaque série
-        self.message_delay = 20.0  # 20 secondes entre chaque message
+        # Configuration pour 100 messages/jour
+        self.max_daily_limit = 100  # 100 messages/jour
+        self.message_burst_limit = 4  # 4 messages avant pause
+        self.burst_pause_duration = 480  # 8 minutes entre chaque série
+        self.message_delay = 12.0  # 12 secondes entre chaque message
         
         # Pauses aléatoires pour comportement humain
         self.use_random_delays = True
-        self.min_message_delay = 20.0  # Minimum 20 secondes
-        self.max_message_delay = 45.0  # Maximum 45 secondes
-        self.min_batch_delay = 900.0   # Minimum 15 minutes
-        self.max_batch_delay = 1500.0   # Maximum 25 minutes
+        self.min_message_delay = 12.0  # Minimum 12 secondes
+        self.max_message_delay = 25.0  # Maximum 25 secondes
+        self.min_batch_delay = 480.0   # Minimum 8 minutes
+        self.max_batch_delay = 900.0   # Maximum 15 minutes
         
         # État de l'envoi
         self.current_session: Optional[SendingSession] = None
