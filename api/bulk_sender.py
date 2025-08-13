@@ -45,14 +45,14 @@ class BulkSender:
         self.sessions_dir = Path.home() / ".excel_whatsapp" / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         
-        # Configuration pour 100 messages/jour
+        # Configuration pour 50 messages/jour
         self.max_workers = 1  # 1 seul thread pour éviter la surcharge
         self.batch_delay = 480.0  # 8 minutes entre batches
         self.retry_attempts = 2
         self.memory_cleanup_interval = 100  # Nettoyer la mémoire tous les 100 messages
         
-        # Configuration pour 100 messages/jour avec pause après 7 messages
-        self.max_daily_limit = 100  # 100 messages/jour
+        # Configuration pour 50 messages/jour avec pause après 7 messages
+        self.max_daily_limit = 50  # 50 messages/jour
         self.message_burst_limit = 7  # 7 messages avant pause de 9 minutes
         self.burst_pause_duration = 540  # 9 minutes entre chaque série de 7
         self.message_delay = 12.0  # 12 secondes entre chaque message
